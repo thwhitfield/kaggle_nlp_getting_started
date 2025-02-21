@@ -1,0 +1,12 @@
+[build-system]
+requires = ["poetry-core>=1.0.0"]
+build-backend = "poetry.core.masonry.api"
+
+[tool.poetry]
+name = "trav_nlp"
+version = "0.1.0"
+description = "A collection of NLP utilities."
+authors = ["Travis Whitfield <your_email@example.com>"]
+license = "MIT"
+readme = "README.md"
+packages = [{ include = "trav_nlp" }]
