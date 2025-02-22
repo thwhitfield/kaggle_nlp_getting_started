@@ -81,6 +81,7 @@ dependencies:
       - jupyterlab-widgets==3.0.13
       - kaggle==1.6.17
       - kiwisolver==1.4.8
+      - lightgbm==4.6.0
       - markupsafe==3.0.2
       - matplotlib==3.10.0
       - matplotlib-inline==0.1.7
@@ -152,6 +153,7 @@ dependencies:
       - tqdm==4.67.1
       - traitlets==5.14.3
       - transformers==4.48.3
+      - trav-nlp==0.1.0
       - types-python-dateutil==2.9.0.20241206
       - typing-extensions==4.12.2
       - tzdata==2025.1
