@@ -1,4 +1,7 @@
+# Misc things to ignore
 data
+outputs/
+mlruns/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
