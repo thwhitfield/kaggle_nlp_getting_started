@@ -107,7 +107,7 @@ def generate_and_submit_to_kaggle(
         pl.Series("target", kaggle_test_preds)
     )
 
-    submissions_dir = Path("../data/submissions")
+    submissions_dir = Path("data/submissions")
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
     filename = f"submission_{timestamp}.csv"
     submission_path = submissions_dir / filename
@@ -117,7 +117,7 @@ def generate_and_submit_to_kaggle(
     submit_to_kaggle("nlp-getting-started", submission_path)
 
 
-@hydra.main(config_path="../conf", config_name="config")
+@hydra.main(config_path="../conf", config_name="config", version_base=None)
 def run_experiment(cfg):
 
     df_train, df_val, df_test = load_or_create_data(cfg)
