@@ -12,7 +12,6 @@ mlflow:
   experiment_name: kaggle_nlp_getting_started
   tags:
     model: lgbm
-  
 
 raw_data:
   train_path: ${project_root}/data/train.csv
@@ -37,7 +36,12 @@ model_params:
   max_depth: -1
   random_state: 42
 
-
+hyperparameter:
+  param_grid:
+    n_estimators: [100, 200]
+    learning_rate: [0.15, 0.1]
+    num_leaves: [31, 50]
 
 experiment:
   submit_to_kaggle: false
+  tuning: false

@@ -11,6 +11,7 @@ from omegaconf import OmegaConf
 from sklearn import feature_extraction, linear_model, model_selection, preprocessing
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
+from sklearn.model_selection import ParameterGrid
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import flatten_dict, polars_train_val_test_split, submit_to_kaggle
@@ -102,6 +103,31 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
     return pipeline
 
 
+def tune_hyperparameters(df_train, df_val, model_params_base, param_grid):
+    best_metric = -float("inf")
+    best_model = None
+    best_params = None
+    # Iterate over all parameter combinations
+    for params in ParameterGrid(param_grid):
+        tuning_params = model_params_base.copy()
+        tuning_params.update(params)
+        with mlflow.start_run(nested=True):
+            model = train(
+                df_train, df_val, full_train=False, model_params=tuning_params
+            )
+            val_preds = model.predict_proba(df_val)[:, 1]
+            metric = roc_auc_score(df_val["target"], val_preds)
+            # Log each parameter with the "model_params." prefix
+            for key, value in params.items():
+                mlflow.log_param(f"model_params.{key}", value)
+            mlflow.log_metric("val_roc_auc", metric)
+            if metric > best_metric:
+                best_metric = metric
+                best_model = model
+                best_params = tuning_params
+    return best_model, best_params, best_metric
+
+
 def eval_df_test(pipeline, df_test):
 
     test_preds = pipeline.predict_proba(df_test)[:, 1]
@@ -144,9 +170,23 @@ def run_experiment(cfg):
 
         df_train, df_val, df_test = load_or_create_data(cfg)
 
-        pipeline = train(df_train, df_val, model_params=cfg.model_params)
+        if cfg.experiment.tuning:
+            # Hyperparameter tuning is enabled.
+            best_model, best_params, best_metric = tune_hyperparameters(
+                df_train,
+                df_val,
+                cfg.model_params,
+                OmegaConf.to_container(cfg.hyperparameter.param_grid),
+            )
+            # Log best_params with the "model_params." prefix for each parameter
+            for key, value in best_params.items():
+                mlflow.log_param(f"best_model_params.{key}", value)
+            mlflow.log_metric("best_val_roc_auc", best_metric)
+            pipeline_model = best_model
+        else:
+            pipeline_model = train(df_train, df_val, model_params=cfg.model_params)
 
-        eval_df_test(pipeline, df_test)
+        eval_df_test(pipeline_model, df_test)
 
         if cfg.experiment.submit_to_kaggle:
             df_full_train = pl.concat([df_train, df_val, df_test])
