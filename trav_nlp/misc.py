@@ -9,6 +9,7 @@ Functions:
 
 import logging
 import os
+import time
 from typing import Tuple
 
 import kaggle
@@ -53,25 +54,79 @@ def polars_train_val_test_split(
 
 
 def submit_to_kaggle(
-    competition_name: str, submission_file: str, message: str = "Submission"
+    competition_name: str,
+    submission_file: str,
+    message: str = "Submission",
+    wait_for_score: bool = True,
+    timeout_mins: int = 10,
 ):
     """
-    Submits a file to a Kaggle competition.
+    Submits a file to a Kaggle competition and optionally waits for the score.
 
     Args:
         competition_name (str): The competition name (e.g., "titanic").
         submission_file (str): The path to the submission file.
         message (str): Submission message.
+        wait_for_score (bool): Whether to wait for and return the score.
+        timeout_mins (int): Maximum time to wait for score in minutes.
+
+    Returns:
+        float or None: The submission score if wait_for_score is True and score is available, None otherwise.
     """
+
     try:
+        # Submit the file
         kaggle.api.competition_submit(
             file_name=submission_file, competition=competition_name, message=message
         )
         print(
             f"Successfully submitted {submission_file} to {competition_name} with message: '{message}'"
         )
+
+        if not wait_for_score:
+            return None
+
+        print(f"Waiting for score (timeout: {timeout_mins} minutes)...")
+
+        # Get the submission ID
+        submissions = kaggle.api.competition_submissions(competition_name)
+        submission_id = None
+
+        for submission in submissions:
+            if submission.description == message:
+                submission_id = submission.ref
+                break
+
+        if not submission_id:
+            print("Could not find submission ID for the just-submitted file.")
+            return None
+
+        # Wait for the score with timeout
+        start_time = time.time()
+        timeout_secs = timeout_mins * 60
+
+        while time.time() - start_time < timeout_secs:
+            submissions = kaggle.api.competition_submissions(competition_name)
+
+            for submission in submissions:
+                if (
+                    submission.ref == submission_id
+                    and submission.status.lower() == "complete"
+                ):
+                    score = float(submission.publicScore)
+                    print(f"Submission scored: {score}")
+                    return score
+
+            # Wait before checking again
+            time.sleep(30)
+            print("Still waiting for score...")
+
+        print(f"Timed out after {timeout_mins} minutes waiting for score.")
+        return None
+
     except Exception as e:
         print(f"Submission failed: {e}")
+        return None
 
 
 def setup_logging():
@@ -80,3 +135,25 @@ def setup_logging():
         format="%(asctime)s %(levelname)s: %(message)s",
         datefmt="%Y-%m-%d %H:%M:%S",
     )
+
+
+def flatten_dict(d, parent_key="", sep="."):
+    """Flatten a nested dictionary.
+
+    Args:
+        d (_type_): _description_
+        parent_key (str, optional): _description_. Defaults to ''.
+        sep (str, optional): _description_. Defaults to '.'.
+
+    Returns:
+        _type_: _description_
+    """
+
+    items = []
+    for k, v in d.items():
+        new_key = f"{parent_key}{sep}{k}" if parent_key else k
+        if isinstance(v, dict):
+            items.extend(flatten_dict(v, new_key, sep=sep).items())
+        else:
+            items.append((new_key, v))
+    return dict(items)

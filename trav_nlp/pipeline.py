@@ -1,16 +1,26 @@
 import datetime
 import logging
+import warnings
 from pathlib import Path
 
 import hydra
 import lightgbm as lgb
+import mlflow
 import polars as pl
+from omegaconf import OmegaConf
 from sklearn import feature_extraction, linear_model, model_selection, preprocessing
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
-from trav_nlp.misc import polars_train_val_test_split, submit_to_kaggle
+from trav_nlp.misc import flatten_dict, polars_train_val_test_split, submit_to_kaggle
+
+# Filter all the LGBMClassifier not valid feature names warnings
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+    category=UserWarning,
+)
 
 
 def load_or_create_data(cfg):
@@ -51,7 +61,7 @@ def load_or_create_data(cfg):
     return df_train, df_val, df_test
 
 
-def train(df_train, df_val=None):
+def train(df_train, df_val=None, full_train=False, model_params={}):
     """Train and optimize the model"""
 
     # Define a function to extract the 'text' column
@@ -71,19 +81,23 @@ def train(df_train, df_val=None):
         extract_text_transform,
         CountVectorizer(),
         convert_to_numpy_transform,
-        lgb.LGBMClassifier(random_state=42),
+        lgb.LGBMClassifier(**model_params),
     )
 
     pipeline.fit(df_train, df_train["target"])
 
     train_preds = pipeline.predict_proba(df_train)[:, 1]
     train_roc_auc = roc_auc_score(df_train["target"], train_preds)
-    logging.info(f"Train ROC: {train_roc_auc}")
+
+    if not full_train:
+        logging.info(f"Train ROC: {train_roc_auc}")
+        mlflow.log_metric("train_roc_auc", train_roc_auc)
 
     if df_val is not None:
         val_preds = pipeline.predict_proba(df_val)[:, 1]
         val_roc_auc = roc_auc_score(df_val["target"], val_preds)
         logging.info(f"Val ROC: {val_roc_auc}")
+        mlflow.log_metric("val_roc_auc", val_roc_auc)
 
     return pipeline
 
@@ -93,6 +107,7 @@ def eval_df_test(pipeline, df_test):
     test_preds = pipeline.predict_proba(df_test)[:, 1]
     test_roc_auc = roc_auc_score(df_test["target"], test_preds)
     logging.info(f"Test ROC: {test_roc_auc}")
+    mlflow.log_metric("test_roc_auc", test_roc_auc)
 
 
 def generate_and_submit_to_kaggle(
@@ -114,24 +129,33 @@ def generate_and_submit_to_kaggle(
 
     kaggle_sample_submission.write_csv(submission_path)
 
-    submit_to_kaggle("nlp-getting-started", submission_path)
+    kaggle_score = submit_to_kaggle("nlp-getting-started", submission_path)
+    logging.info(f"Public Kaggle score: {kaggle_score}")
+    mlflow.log_metric("public_kaggle_score", kaggle_score)
 
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def run_experiment(cfg):
 
-    df_train, df_val, df_test = load_or_create_data(cfg)
+    with mlflow.start_run(nested=True):
+        mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
-    pipeline = train(df_train, df_val)
+        df_train, df_val, df_test = load_or_create_data(cfg)
 
-    eval_df_test(pipeline, df_test)
+        pipeline = train(df_train, df_val, model_params=cfg.model_params)
 
-    if cfg.experiment.submit_to_kaggle:
-        df_full_train = pl.concat([df_train, df_val, df_test])
-        full_pipeline = train(df_full_train)
-        generate_and_submit_to_kaggle(
-            full_pipeline, cfg.raw_data.test_path, cfg.raw_data.sample_submission_path
-        )
+        eval_df_test(pipeline, df_test)
+
+        if cfg.experiment.submit_to_kaggle:
+            df_full_train = pl.concat([df_train, df_val, df_test])
+            full_pipeline = train(
+                df_full_train, model_params=cfg.model_params, full_train=True
+            )
+            generate_and_submit_to_kaggle(
+                full_pipeline,
+                cfg.raw_data.test_path,
+                cfg.raw_data.sample_submission_path,
+            )
 
 
 if __name__ == "__main__":
