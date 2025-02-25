@@ -137,7 +137,9 @@ def generate_and_submit_to_kaggle(
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def run_experiment(cfg):
 
+    mlflow.set_experiment(cfg.mlflow.experiment_name)
     with mlflow.start_run(nested=True):
+        mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))
         mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
         df_train, df_val, df_test = load_or_create_data(cfg)

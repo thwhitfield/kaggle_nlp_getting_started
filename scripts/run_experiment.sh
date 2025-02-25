@@ -4,7 +4,7 @@
 
 
 # python trav_nlp/pipeline.py
-python trav_nlp/pipeline.py experiment.submit_to_kaggle=true
-# python trav_nlp/pipeline.py
+# python trav_nlp/pipeline.py experiment.submit_to_kaggle=true
+python trav_nlp/pipeline.py
 
 
