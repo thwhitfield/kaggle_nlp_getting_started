@@ -10,3 +10,7 @@ load-environment:
 download-data:
 	kaggle competitions download -c nlp-getting-started -p data/
 	unzip data/nlp-getting-started.zip -d data/
+
+# Stop any running mlflow servers
+stop-mlflow-servers:
+	pkill -f gunicorn
