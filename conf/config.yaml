@@ -35,12 +35,27 @@ model_params:
   learning_rate: 0.15
   max_depth: -1
   random_state: 42
+  booster: 'gbdt'
 
-hyperparameter:
-  param_grid:
-    n_estimators: [100, 200]
-    learning_rate: [0.15, 0.1]
-    num_leaves: [31, 50]
+hyperparameter_tuning:
+  n_trials: 10
+  parameters:
+    n_estimators:
+      type: int
+      low: 100
+      high: 300
+    learning_rate:
+      type: float
+      low: 0.05
+      high: 0.20
+      log: false
+    num_leaves:
+      type: int
+      low: 10
+      high: 50
+    booster:
+      type: categorical
+      choices: ["gbdt", "dart", "goss"]
 
 experiment:
   submit_to_kaggle: false

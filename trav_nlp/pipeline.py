@@ -6,6 +6,7 @@ from pathlib import Path
 import hydra
 import lightgbm as lgb
 import mlflow
+import optuna
 import polars as pl
 from omegaconf import OmegaConf
 from sklearn import feature_extraction, linear_model, model_selection, preprocessing
@@ -103,29 +104,54 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
     return pipeline
 
 
-def tune_hyperparameters(df_train, df_val, model_params_base, param_grid):
-    best_metric = -float("inf")
-    best_model = None
-    best_params = None
-    # Iterate over all parameter combinations
-    for params in ParameterGrid(param_grid):
-        tuning_params = model_params_base.copy()
-        tuning_params.update(params)
+def tune_hyperparameters(
+    df_train, df_val, model_params_base, param_ranges, n_trials=10
+):
+    def objective(trial):
+
         with mlflow.start_run(nested=True):
+            tuning_params = model_params_base.copy()
+            # Log parameters to MLflow with prefix
+            mlflow_params = {}
+            for param, spec in param_ranges.items():
+                if spec["type"] == "int":
+                    tuning_params[param] = trial.suggest_int(
+                        param, spec["low"], spec["high"]
+                    )
+                elif spec["type"] == "float":
+                    if spec.get("log", False):
+                        tuning_params[param] = trial.suggest_float(
+                            param, spec["low"], spec["high"], log=True
+                        )
+                    else:
+                        tuning_params[param] = trial.suggest_float(
+                            param, spec["low"], spec["high"]
+                        )
+                elif spec["type"] == "categorical":
+                    tuning_params[param] = trial.suggest_categorical(
+                        param, spec["choices"]
+                    )
+
+                # Store parameter with prefix for MLflow logging
+                mlflow_params[f"model_params.{param}"] = tuning_params[param]
+
+            # Log the trial's parameters to MLflow
+            mlflow.log_params(mlflow_params)
+
             model = train(
                 df_train, df_val, full_train=False, model_params=tuning_params
             )
             val_preds = model.predict_proba(df_val)[:, 1]
-            metric = roc_auc_score(df_val["target"], val_preds)
-            # Log each parameter with the "model_params." prefix
-            for key, value in params.items():
-                mlflow.log_param(f"model_params.{key}", value)
-            mlflow.log_metric("val_roc_auc", metric)
-            if metric > best_metric:
-                best_metric = metric
-                best_model = model
-                best_params = tuning_params
-    return best_model, best_params, best_metric
+        return roc_auc_score(df_val["target"], val_preds)
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=20)
+
+    best_trial_params = study.best_trial.params
+    best_params = model_params_base.copy()
+    best_params.update(best_trial_params)
+    best_model = train(df_train, df_val, full_train=False, model_params=best_params)
+    return best_model, best_params, study.best_value
 
 
 def eval_df_test(pipeline, df_test):
@@ -172,13 +198,14 @@ def run_experiment(cfg):
 
         if cfg.experiment.tuning:
             # Hyperparameter tuning is enabled.
+            # Pass the new hyperparameter parameters structure from config to the tuner.
             best_model, best_params, best_metric = tune_hyperparameters(
                 df_train,
                 df_val,
                 cfg.model_params,
-                OmegaConf.to_container(cfg.hyperparameter.param_grid),
+                OmegaConf.to_container(cfg.hyperparameter_tuning.parameters),
+                n_trials=cfg.hyperparameter_tuning.n_trials,
             )
-            # Log best_params with the "model_params." prefix for each parameter
             for key, value in best_params.items():
                 mlflow.log_param(f"best_model_params.{key}", value)
             mlflow.log_metric("best_val_roc_auc", best_metric)
