@@ -1,0 +1,30 @@
+# Disable Hydra's automatic chdir if you want your project_root to remain the same as when you launch the command.
+hydra:
+  job:
+    chdir: false
+
+project_root: /Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started
+
+mlflow:
+  host: 127.0.0.1
+  port: '8080'
+  uri: http://127.0.0.1:8080
+
+raw_data:
+  train_path: ${project_root}/data/train.csv
+  test_path: ${project_root}/data/test.csv
+  sample_submission_path: ${project_root}/data/sample_submission.csv
+
+training_data:
+  train_path: ${project_root}/data/splits/train.parquet
+  val_path: ${project_root}/data/splits/val.parquet
+  test_path: ${project_root}/data/splits/test.parquet
+
+params:
+  train_frac: 0.8
+  val_frac: 0.1
+  test_frac: 0.1
+  train_val_test_seed: 42
+
+experiment:
+  submit_to_kaggle: false
