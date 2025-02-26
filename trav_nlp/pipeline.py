@@ -9,10 +9,8 @@ import mlflow
 import optuna
 import polars as pl
 from omegaconf import OmegaConf
-from sklearn import feature_extraction, linear_model, model_selection, preprocessing
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
-from sklearn.model_selection import ParameterGrid
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import flatten_dict, polars_train_val_test_split, submit_to_kaggle
@@ -26,7 +24,15 @@ warnings.filterwarnings(
 
 
 def load_or_create_data(cfg):
+    """
+    Load or create training, validation, and test datasets.
 
+    Args:
+        cfg (OmegaConf): Configuration object containing paths and parameters.
+
+    Returns:
+        tuple: DataFrames for training, validation, and test datasets.
+    """
     # Define local variables for configuration paths
     train_path = cfg.training_data.train_path
     val_path = cfg.training_data.val_path
@@ -64,7 +70,18 @@ def load_or_create_data(cfg):
 
 
 def train(df_train, df_val=None, full_train=False, model_params={}):
-    """Train and optimize the model"""
+    """
+    Train and optimize the model.
+
+    Args:
+        df_train (DataFrame): Training dataset.
+        df_val (DataFrame, optional): Validation dataset. Defaults to None.
+        full_train (bool, optional): Whether to train on the full dataset. Defaults to False.
+        model_params (dict, optional): Parameters for the model. Defaults to {}.
+
+    Returns:
+        Pipeline: Trained model pipeline.
+    """
 
     # Define a function to extract the 'text' column
     def extract_text(df):
@@ -104,36 +121,66 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
     return pipeline
 
 
+def suggest_parameters(trial, param_ranges):
+    """
+    Suggest parameters using Optuna trial.
+
+    Args:
+        trial (optuna.trial.Trial): Optuna trial object.
+        param_ranges (dict): Parameter ranges for tuning.
+
+    Returns:
+        dict: Suggested parameters.
+    """
+    tuning_params = {}
+    for param, spec in param_ranges.items():
+        if spec["type"] == "int":
+            tuning_params[param] = trial.suggest_int(param, spec["low"], spec["high"])
+        elif spec["type"] == "float":
+            if spec.get("log", False):
+                tuning_params[param] = trial.suggest_float(
+                    param, spec["low"], spec["high"], log=True
+                )
+            else:
+                tuning_params[param] = trial.suggest_float(
+                    param, spec["low"], spec["high"]
+                )
+        elif spec["type"] == "categorical":
+            tuning_params[param] = trial.suggest_categorical(param, spec["choices"])
+    return tuning_params
+
+
 def tune_hyperparameters(
     df_train, df_val, model_params_base, param_ranges, n_trials=10
 ):
+    """
+    Tune hyperparameters using Optuna.
+
+    Args:
+        df_train (DataFrame): Training dataset.
+        df_val (DataFrame): Validation dataset.
+        model_params_base (dict): Base model parameters.
+        param_ranges (dict): Parameter ranges for tuning.
+        n_trials (int, optional): Number of tuning trials. Defaults to 10.
+
+    Returns:
+        tuple: Best model, best parameters, and best metric value.
+    """
+
     def objective(trial):
 
         with mlflow.start_run(nested=True):
             tuning_params = model_params_base.copy()
             # Log parameters to MLflow with prefix
             mlflow_params = {}
-            for param, spec in param_ranges.items():
-                if spec["type"] == "int":
-                    tuning_params[param] = trial.suggest_int(
-                        param, spec["low"], spec["high"]
-                    )
-                elif spec["type"] == "float":
-                    if spec.get("log", False):
-                        tuning_params[param] = trial.suggest_float(
-                            param, spec["low"], spec["high"], log=True
-                        )
-                    else:
-                        tuning_params[param] = trial.suggest_float(
-                            param, spec["low"], spec["high"]
-                        )
-                elif spec["type"] == "categorical":
-                    tuning_params[param] = trial.suggest_categorical(
-                        param, spec["choices"]
-                    )
+            suggested_params = suggest_parameters(trial, param_ranges)
+            tuning_params.update(suggested_params)
 
-                # Store parameter with prefix for MLflow logging
-                mlflow_params[f"model_params.{param}"] = tuning_params[param]
+            # Store parameter with prefix for MLflow logging
+            mlflow_params = {
+                f"model_params.{param}": value
+                for param, value in suggested_params.items()
+            }
 
             # Log the trial's parameters to MLflow
             mlflow.log_params(mlflow_params)
@@ -145,7 +192,7 @@ def tune_hyperparameters(
         return roc_auc_score(df_val["target"], val_preds)
 
     study = optuna.create_study(direction="maximize")
-    study.optimize(objective, n_trials=20)
+    study.optimize(objective, n_trials=n_trials)
 
     best_trial_params = study.best_trial.params
     best_params = model_params_base.copy()
@@ -155,7 +202,16 @@ def tune_hyperparameters(
 
 
 def eval_df_test(pipeline, df_test):
+    """
+    Evaluate the model on the test dataset.
 
+    Args:
+        pipeline (Pipeline): Trained model pipeline.
+        df_test (DataFrame): Test dataset.
+
+    Returns:
+        None
+    """
     test_preds = pipeline.predict_proba(df_test)[:, 1]
     test_roc_auc = roc_auc_score(df_test["target"], test_preds)
     logging.info(f"Test ROC: {test_roc_auc}")
@@ -165,7 +221,17 @@ def eval_df_test(pipeline, df_test):
 def generate_and_submit_to_kaggle(
     pipeline, kaggle_test_path, kaggle_sample_submission_path
 ):
+    """
+    Generate predictions and submit to Kaggle.
 
+    Args:
+        pipeline (Pipeline): Trained model pipeline.
+        kaggle_test_path (str): Path to Kaggle test dataset.
+        kaggle_sample_submission_path (str): Path to Kaggle sample submission file.
+
+    Returns:
+        None
+    """
     df_kaggle_test = pl.read_csv(kaggle_test_path)
     kaggle_sample_submission = pl.read_csv(kaggle_sample_submission_path)
 
@@ -188,7 +254,15 @@ def generate_and_submit_to_kaggle(
 
 @hydra.main(config_path="../conf", config_name="config", version_base=None)
 def run_experiment(cfg):
+    """
+    Run the entire experiment pipeline.
 
+    Args:
+        cfg (OmegaConf): Configuration object.
+
+    Returns:
+        None
+    """
     mlflow.set_experiment(cfg.mlflow.experiment_name)
     with mlflow.start_run(nested=True):
         mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))

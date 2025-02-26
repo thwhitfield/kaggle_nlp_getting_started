@@ -6,9 +6,6 @@ hydra:
 project_root: /Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started
 
 mlflow:
-  # host: 127.0.0.1
-  # port: '8080'
-  # uri: http://127.0.0.1:8080
   experiment_name: kaggle_nlp_getting_started
   tags:
     model: lgbm
@@ -59,4 +56,4 @@ hyperparameter_tuning:
 
 experiment:
   submit_to_kaggle: false
-  tuning: false
+  tuning: true
