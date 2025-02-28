@@ -22,7 +22,7 @@ def polars_train_val_test_split(
     val_frac: float = 0.1,
     test_frac: float = 0.1,
     shuffle: bool = True,
-    seed: int = 42,
+    seed: int = None,
 ) -> Tuple[pl.DataFrame, pl.DataFrame, pl.DataFrame]:
     """
     Splits a Polars DataFrame into train, validation, and test sets.
@@ -51,6 +51,39 @@ def polars_train_val_test_split(
     test_df = df[val_end:]
 
     return train_df, val_df, test_df
+
+
+def polars_train_test_split(
+    df: pl.DataFrame,
+    train_frac: float = 0.8,
+    test_frac: float = 0.2,
+    shuffle: bool = True,
+    seed: int = None,
+) -> "Tuple[pl.DataFrame, pl.DataFrame]":
+    """
+    Splits a Polars DataFrame into train and test sets.
+
+    Parameters:
+    - df (pl.DataFrame): The input DataFrame.
+    - train_frac (float): Fraction of data for training.
+    - test_frac (float): Fraction of data for testing.
+    - shuffle (bool): Whether to shuffle the data before splitting.
+    - seed (int): Random seed for shuffling.
+
+    Returns:
+    - (pl.DataFrame, pl.DataFrame): Train and Test DataFrames.
+    """
+    assert train_frac + test_frac == 1.0, "Fractions must sum to 1"
+
+    if shuffle:
+        df = df.sample(fraction=1.0, shuffle=True, seed=seed)
+
+    n = len(df)
+
+    train_end = int(train_frac * n)
+    train_df = df[:train_end]
+    test_df = df[train_end:]
+    return train_df, test_df
 
 
 def submit_to_kaggle(

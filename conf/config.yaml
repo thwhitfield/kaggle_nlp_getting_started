@@ -1,3 +1,7 @@
+defaults:
+  - _self_
+
+
 # Disable Hydra's automatic chdir if you want your project_root to remain the same as when you launch the command.
 hydra:
   job:
@@ -22,8 +26,7 @@ training_data:
 
 params:
   train_frac: 0.8
-  val_frac: 0.1
-  test_frac: 0.1
+  test_frac: 0.2
   train_val_test_seed: 42
 
 model_params:
@@ -32,7 +35,7 @@ model_params:
   learning_rate: 0.15
   max_depth: -1
   random_state: 42
-  booster: 'gbdt'
+  boosting_type: 'gbdt'
 
 hyperparameter_tuning:
   n_trials: 10
@@ -50,10 +53,15 @@ hyperparameter_tuning:
       type: int
       low: 10
       high: 50
-    booster:
+    boosting_type:
       type: categorical
       choices: ["gbdt", "dart", "goss"]
 
 experiment:
   submit_to_kaggle: false
   tuning: true
+
+kaggle:
+  data_dir: ${project_root}/data/kaggle
+  competition: nlp-getting-started
+  train_file: ${project_root}/data/kaggle/train.csv
