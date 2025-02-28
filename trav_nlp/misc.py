@@ -193,59 +193,84 @@ def flatten_dict(d, parent_key="", sep="."):
     return dict(items)
 
 
-def verify_git_commit(target_folder):
+import os
+import subprocess
+
+
+def verify_git_commit(*target_folders):
     """
-    Verifies that the target_folder within a git repository has no uncommitted changes or untracked files.
+    Verifies that each specified folder within a git repository has no uncommitted changes or untracked files.
 
     Parameters:
-        target_folder (str): Path to the folder within your repository that you want to check.
+        *target_folders (str): One or more paths to folders within your repository that you want to check.
 
     Returns:
-        str: The commit hash of HEAD if the working tree is clean.
+        str: The commit hash of HEAD if the working tree is clean across all folders.
 
     Raises:
-        RuntimeError: If the folder is not within a git repository or if there are local changes.
+        RuntimeError: If any folder is not within a git repository, if folders are in different repositories,
+                      or if there are local changes or untracked files in any of the folders.
     """
-    # Get absolute path for clarity.
-    target_folder = os.path.abspath(target_folder)
+    if not target_folders:
+        raise ValueError("At least one target folder must be specified.")
 
-    # First, ensure that the folder is inside a git repo.
-    try:
-        # This returns the root of the repository.
-        repo_root = subprocess.check_output(
-            ["git", "rev-parse", "--show-toplevel"], cwd=target_folder, text=True
+    repo_root = None
+
+    # Check each target folder.
+    for folder in target_folders:
+        # Convert folder path to an absolute path.
+        abs_folder = os.path.abspath(folder)
+
+        # Determine the repository root for the current folder.
+        try:
+            current_repo = subprocess.check_output(
+                ["git", "rev-parse", "--show-toplevel"], cwd=abs_folder, text=True
+            ).strip()
+        except subprocess.CalledProcessError as e:
+            raise RuntimeError(
+                f"The specified folder '{abs_folder}' is not inside a git repository."
+            ) from e
+
+        # Ensure all folders belong to the same repository.
+        if repo_root is None:
+            repo_root = current_repo
+        elif repo_root != current_repo:
+            raise RuntimeError(
+                f"All target folders must be in the same git repository. "
+                f"'{abs_folder}' is in a different repository than '{repo_root}'."
+            )
+
+        # Get the relative path of the folder with respect to the repo root.
+        rel_folder = os.path.relpath(abs_folder, repo_root)
+
+        # Check for uncommitted changes in files tracked by git.
+        diff_cmd = ["git", "diff", "--exit-code", "HEAD", "--", rel_folder]
+        try:
+            subprocess.check_call(
+                diff_cmd,
+                cwd=repo_root,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+        except subprocess.CalledProcessError:
+            raise RuntimeError(f"There are uncommitted changes in '{abs_folder}'.")
+
+        # Check for untracked files within the target folder.
+        ls_files_cmd = [
+            "git",
+            "ls-files",
+            "--others",
+            "--exclude-standard",
+            "--",
+            rel_folder,
+        ]
+        untracked = subprocess.check_output(
+            ls_files_cmd, cwd=repo_root, text=True
         ).strip()
-    except subprocess.CalledProcessError as e:
-        raise RuntimeError(
-            "The specified folder is not inside a git repository."
-        ) from e
+        if untracked:
+            raise RuntimeError(f"There are untracked files in '{abs_folder}'.")
 
-    # Check for any changes (modified, added, or deleted) in files tracked by git.
-    diff_cmd = ["git", "diff", "--exit-code", "HEAD", "--", target_folder]
-    try:
-        subprocess.check_call(
-            diff_cmd,
-            cwd=repo_root,
-            stdout=subprocess.DEVNULL,
-            stderr=subprocess.DEVNULL,
-        )
-    except subprocess.CalledProcessError:
-        raise RuntimeError(f"There are uncommitted changes in {target_folder}.")
-
-    # Check for untracked files within the target folder.
-    ls_files_cmd = [
-        "git",
-        "ls-files",
-        "--others",
-        "--exclude-standard",
-        "--",
-        target_folder,
-    ]
-    untracked = subprocess.check_output(ls_files_cmd, cwd=repo_root, text=True).strip()
-    if untracked:
-        raise RuntimeError(f"There are untracked files in {target_folder}.")
-
-    # If the checks pass, return the current commit hash.
+    # If all checks pass, return the current commit hash.
     commit_hash = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
     ).strip()
