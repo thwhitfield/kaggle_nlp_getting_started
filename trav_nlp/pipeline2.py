@@ -1,3 +1,4 @@
+import datetime
 import logging
 import os
 import sys
@@ -8,18 +9,24 @@ from pathlib import Path
 import kaggle
 import lightgbm as lgb
 import mlflow
+import optuna
 import polars as pl
-
-# Remove hydra.main and import initialize/compose instead
 from hydra import compose, initialize
-from omegaconf import DictConfig
+from omegaconf import DictConfig, OmegaConf
 from prefect import flow, task
 from prefect.cache_policies import DEFAULT, INPUTS
+from prefect.context import get_run_context  # New import
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
-from trav_nlp.misc import polars_train_test_split, verify_git_commit
+from trav_nlp.misc import (
+    flatten_dict,
+    polars_train_test_split,
+    polars_train_val_test_split,
+    submit_to_kaggle,
+    verify_git_commit,
+)
 
 # Get the directory containing the current file
 CURRENT_DIR = Path(__file__).parent
@@ -64,9 +71,10 @@ def download_kaggle_data(
 
 
 @task(cache_policy=INPUTS)
-def train_test_split(
+def train_val_test_split(
     data_file: str,
     train_frac: float,
+    val_frac: float,
     test_frac: float,
     random_seed: int = None,
 ):
@@ -77,15 +85,16 @@ def train_test_split(
     df = pl.read_csv(data_file)
 
     # Split data using polars_train_test_split
-    df_train, df_test = polars_train_test_split(
+    df_train, df_val, df_test = polars_train_val_test_split(
         df,
         train_frac=train_frac,
+        val_frac=val_frac,
         test_frac=test_frac,
         shuffle=True,
         seed=random_seed,
     )
 
-    return df_train, df_test
+    return df_train, df_val, df_test
 
 
 @task
@@ -141,40 +150,199 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
     return pipeline
 
 
-def eval_on_test():
-    pass
+def eval_df_test(pipeline, df_test):
+    """
+    Evaluate the model on the test dataset.
+
+    Args:
+        pipeline (Pipeline): Trained model pipeline.
+        df_test (DataFrame): Test dataset.
+
+    Returns:
+        None
+    """
+    test_preds = pipeline.predict_proba(df_test)[:, 1]
+    test_roc_auc = roc_auc_score(df_test["target"], test_preds)
+    logging.info(f"Test ROC: {test_roc_auc}")
+    mlflow.log_metric("test_roc_auc", test_roc_auc)
 
 
-def submit_to_kaggle():
-    pass
+def generate_and_submit_to_kaggle(
+    pipeline, kaggle_test_path, kaggle_sample_submission_path
+):
+    """
+    Generate predictions and submit to Kaggle.
+
+    Args:
+        pipeline (Pipeline): Trained model pipeline.
+        kaggle_test_path (str): Path to Kaggle test dataset.
+        kaggle_sample_submission_path (str): Path to Kaggle sample submission file.
+
+    Returns:
+        None
+    """
+    df_kaggle_test = pl.read_csv(kaggle_test_path)
+    kaggle_sample_submission = pl.read_csv(kaggle_sample_submission_path)
+
+    kaggle_test_preds = pipeline.predict(df_kaggle_test)
+    kaggle_sample_submission = kaggle_sample_submission.with_columns(
+        pl.Series("target", kaggle_test_preds)
+    )
+
+    submissions_dir = Path("data/submissions")
+    timestamp = datetime.datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
+    filename = f"submission_{timestamp}.csv"
+    submission_path = submissions_dir / filename
+
+    kaggle_sample_submission.write_csv(submission_path)
+
+    kaggle_score = submit_to_kaggle("nlp-getting-started", submission_path)
+    logging.info(f"Public Kaggle score: {kaggle_score}")
+    mlflow.log_metric("public_kaggle_score", kaggle_score)
+
+
+def suggest_parameters(trial, param_ranges):
+    """
+    Suggest parameters using Optuna trial.
+
+    Args:
+        trial (optuna.trial.Trial): Optuna trial object.
+        param_ranges (dict): Parameter ranges for tuning.
+
+    Returns:
+        dict: Suggested parameters.
+    """
+    tuning_params = {}
+    for param, spec in param_ranges.items():
+        if spec["type"] == "int":
+            tuning_params[param] = trial.suggest_int(param, spec["low"], spec["high"])
+        elif spec["type"] == "float":
+            if spec.get("log", False):
+                tuning_params[param] = trial.suggest_float(
+                    param, spec["low"], spec["high"], log=True
+                )
+            else:
+                tuning_params[param] = trial.suggest_float(
+                    param, spec["low"], spec["high"]
+                )
+        elif spec["type"] == "categorical":
+            tuning_params[param] = trial.suggest_categorical(param, spec["choices"])
+    return tuning_params
+
+
+def tune_hyperparameters(
+    df_train, df_val, model_params_base, param_ranges, n_trials=10
+):
+    """
+    Tune hyperparameters using Optuna.
+
+    Args:
+        df_train (DataFrame): Training dataset.
+        df_val (DataFrame): Validation dataset.
+        model_params_base (dict): Base model parameters.
+        param_ranges (dict): Parameter ranges for tuning.
+        n_trials (int, optional): Number of tuning trials. Defaults to 10.
+
+    Returns:
+        tuple: Best model, best parameters, and best metric value.
+    """
+
+    def objective(trial):
+
+        with mlflow.start_run(nested=True):
+            tuning_params = model_params_base.copy()
+            # Log parameters to MLflow with prefix
+            mlflow_params = {}
+            suggested_params = suggest_parameters(trial, param_ranges)
+            tuning_params.update(suggested_params)
+
+            # Store parameter with prefix for MLflow logging
+            mlflow_params = {
+                f"model_params.{param}": value
+                for param, value in suggested_params.items()
+            }
+
+            # Log the trial's parameters to MLflow
+            mlflow.log_params(mlflow_params)
+
+            model = train(
+                df_train, df_val, full_train=False, model_params=tuning_params
+            )
+            val_preds = model.predict_proba(df_val)[:, 1]
+        return roc_auc_score(df_val["target"], val_preds)
+
+    study = optuna.create_study(direction="maximize")
+    study.optimize(objective, n_trials=n_trials)
+
+    best_trial_params = study.best_trial.params
+    best_params = model_params_base.copy()
+    best_params.update(best_trial_params)
+    best_model = train(df_train, df_val, full_train=False, model_params=best_params)
+    return best_model, best_params, study.best_value
 
 
 @flow
 def run_pipeline(cfg: DictConfig):
+    ctx = get_run_context()
+    run_name = getattr(ctx.flow_run, "name", "default_run")  # Retrieve Prefect run name
+    with mlflow.start_run(run_name=run_name):  # Use run_name in mlflow run
+        mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))
+        mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
-    # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
-    # commit_hash = verify_git_commit(CURRENT_DIR)
+        # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
+        # commit_hash = verify_git_commit(CURRENT_DIR)
 
-    # Call download_kaggle_data using config parameters
-    download_kaggle_data(
-        data_dir=cfg.kaggle.data_dir,
-        competition_name=cfg.kaggle.competition,
-    )
-    # Call train_test_split using specified parameters from config
-    df_train, df_test = train_test_split(
-        data_file=cfg.kaggle.train_file,
-        train_frac=cfg.params.train_frac,
-        test_frac=cfg.params.test_frac,
-        random_seed=cfg.params.train_val_test_seed,
-    )
+        # Call download_kaggle_data using config parameters
+        download_kaggle_data(
+            data_dir=cfg.kaggle.data_dir,
+            competition_name=cfg.kaggle.competition,
+        )
+        # Call train_test_split using specified parameters from config
+        df_train, df_val, df_test = train_val_test_split(
+            data_file=cfg.kaggle.train_file,
+            train_frac=cfg.params.train_frac,
+            val_frac=cfg.params.val_frac,
+            test_frac=cfg.params.test_frac,
+            random_seed=cfg.params.train_val_test_seed,
+        )
 
-    # Train the model using the training data
-    model = train(
-        df_train,
-        df_val=None,
-        full_train=False,
-        model_params=cfg.model_params,
-    )
+        # # Train the model using the training data
+        # model = train(
+        #     df_train,
+        #     df_val=df_val,
+        #     full_train=False,
+        #     model_params=cfg.model_params,
+        # )
+
+        if cfg.experiment.tuning:
+            # Hyperparameter tuning is enabled.
+            # Pass the new hyperparameter parameters structure from config to the tuner.
+            best_model, best_params, best_metric = tune_hyperparameters(
+                df_train,
+                df_val,
+                cfg.model_params,
+                OmegaConf.to_container(cfg.hyperparameter_tuning.parameters),
+                n_trials=cfg.hyperparameter_tuning.n_trials,
+            )
+            for key, value in best_params.items():
+                mlflow.log_param(f"best_model_params.{key}", value)
+            mlflow.log_metric("best_val_roc_auc", best_metric)
+            model = best_model
+        else:
+            model = train(df_train, df_val, model_params=cfg.model_params)
+
+        eval_df_test(model, df_test)
+
+        if cfg.experiment.submit_to_kaggle:
+            df_full_train = pl.concat([df_train, df_test])
+            full_pipeline = train(
+                df_full_train, model_params=cfg.model_params, full_train=True
+            )
+            generate_and_submit_to_kaggle(
+                full_pipeline,
+                cfg.raw_data.test_path,
+                cfg.raw_data.sample_submission_path,
+            )
 
 
 if __name__ == "__main__":

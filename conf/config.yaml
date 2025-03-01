@@ -26,7 +26,8 @@ training_data:
 
 params:
   train_frac: 0.8
-  test_frac: 0.2
+  val_frac: 0.1
+  test_frac: 0.1
   train_val_test_seed: 42
 
 model_params:
