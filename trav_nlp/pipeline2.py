@@ -306,14 +306,6 @@ def run_pipeline(cfg: DictConfig):
             random_seed=cfg.params.train_val_test_seed,
         )
 
-        # # Train the model using the training data
-        # model = train(
-        #     df_train,
-        #     df_val=df_val,
-        #     full_train=False,
-        #     model_params=cfg.model_params,
-        # )
-
         if cfg.experiment.tuning:
             # Hyperparameter tuning is enabled.
             # Pass the new hyperparameter parameters structure from config to the tuner.
