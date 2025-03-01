@@ -295,6 +295,7 @@ def run_pipeline(cfg: DictConfig):
         os.makedirs(config_save_dir, exist_ok=True)
         config_save_path = os.path.join(config_save_dir, f"{run_name}.yaml")
         OmegaConf.save(cfg, config_save_path, resolve=True)
+        mlflow.log_artifact(config_save_path)
 
         mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))
         mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
@@ -332,6 +333,7 @@ def run_pipeline(cfg: DictConfig):
             # Update the config with the best parameters and re-save
             cfg.model_params.update(best_params)
             OmegaConf.save(cfg, config_save_path, resolve=True)
+            mlflow.log_artifact(config_save_path)
             model = best_model
         else:
             model = train(df_train, df_val, model_params=cfg.model_params)
