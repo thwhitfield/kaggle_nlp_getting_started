@@ -150,6 +150,7 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
     return pipeline
 
 
+@task
 def eval_df_test(pipeline, df_test):
     """
     Evaluate the model on the test dataset.
@@ -167,8 +168,9 @@ def eval_df_test(pipeline, df_test):
     mlflow.log_metric("test_roc_auc", test_roc_auc)
 
 
+@task
 def generate_and_submit_to_kaggle(
-    pipeline, kaggle_test_path, kaggle_sample_submission_path
+    pipeline, kaggle_test_path, kaggle_sample_submission_path, submissions_dir
 ):
     """
     Generate predictions and submit to Kaggle.
@@ -189,10 +191,9 @@ def generate_and_submit_to_kaggle(
         pl.Series("target", kaggle_test_preds)
     )
 
-    submissions_dir = Path("data/submissions")
     timestamp = datetime.datetime.now().strftime("%Y_%m_%d__%H_%M_%S")
     filename = f"submission_{timestamp}.csv"
-    submission_path = submissions_dir / filename
+    submission_path = Path(submissions_dir) / filename
 
     kaggle_sample_submission.write_csv(submission_path)
 
@@ -230,6 +231,7 @@ def suggest_parameters(trial, param_ranges):
     return tuning_params
 
 
+@task
 def tune_hyperparameters(
     df_train, df_val, model_params_base, param_ranges, n_trials=10
 ):
@@ -294,19 +296,19 @@ def run_pipeline(cfg: DictConfig):
 
         # Call download_kaggle_data using config parameters
         download_kaggle_data(
-            data_dir=cfg.kaggle.data_dir,
-            competition_name=cfg.kaggle.competition,
+            data_dir=cfg.data.raw_dir,
+            competition_name=cfg.kaggle_competition,
         )
         # Call train_test_split using specified parameters from config
         df_train, df_val, df_test = train_val_test_split(
-            data_file=cfg.kaggle.train_file,
-            train_frac=cfg.params.train_frac,
-            val_frac=cfg.params.val_frac,
-            test_frac=cfg.params.test_frac,
-            random_seed=cfg.params.train_val_test_seed,
+            data_file=cfg.data.raw_train_path,
+            train_frac=cfg.split_params.train_frac,
+            val_frac=cfg.split_params.val_frac,
+            test_frac=cfg.split_params.test_frac,
+            random_seed=cfg.split_params.train_val_test_seed,
         )
 
-        if cfg.experiment.tuning:
+        if cfg.run_hyperparameter_tuning:
             # Hyperparameter tuning is enabled.
             # Pass the new hyperparameter parameters structure from config to the tuner.
             best_model, best_params, best_metric = tune_hyperparameters(
@@ -325,15 +327,16 @@ def run_pipeline(cfg: DictConfig):
 
         eval_df_test(model, df_test)
 
-        if cfg.experiment.submit_to_kaggle:
+        if cfg.submit_to_kaggle:
             df_full_train = pl.concat([df_train, df_test])
             full_pipeline = train(
                 df_full_train, model_params=cfg.model_params, full_train=True
             )
             generate_and_submit_to_kaggle(
                 full_pipeline,
-                cfg.raw_data.test_path,
-                cfg.raw_data.sample_submission_path,
+                cfg.data.raw_test_path,
+                cfg.data.raw_sample_submission_path,
+                submissions_dir=cfg.data.submissions_dir,
             )
 
 

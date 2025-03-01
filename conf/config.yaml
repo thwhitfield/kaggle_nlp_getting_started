@@ -7,24 +7,34 @@ hydra:
   job:
     chdir: false
 
-project_root: /Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started
+run_hyperparameter_tuning: false
+submit_to_kaggle: false
 
 mlflow:
   experiment_name: kaggle_nlp_getting_started
   tags:
+    features: count_vectorizer
     model: lgbm
 
-raw_data:
-  train_path: ${project_root}/data/train.csv
-  test_path: ${project_root}/data/test.csv
-  sample_submission_path: ${project_root}/data/sample_submission.csv
+kaggle_competition: nlp-getting-started
 
-training_data:
-  train_path: ${project_root}/data/splits/train.parquet
-  val_path: ${project_root}/data/splits/val.parquet
-  test_path: ${project_root}/data/splits/test.parquet
+project_root: /Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started
 
-params:
+data:
+  data_dir: ${project_root}/data
+  raw_dir: ${data.data_dir}/raw
+  split_dir: ${data.data_dir}/splits
+  submissions_dir: ${data.data_dir}/submissions
+
+  raw_train_path: ${data.raw_dir}/train.csv
+  raw_test_path: ${data.raw_dir}/test.csv
+  raw_sample_submission_path: ${data.raw_dir}/sample_submission.csv
+
+  train_split_path: ${data.split_dir}/train.parquet
+  val_split_path: ${data.split_dir}/val.parquet
+  test_split_path: ${data.split_dir}/test.parquet
+
+split_params:
   train_frac: 0.8
   val_frac: 0.1
   test_frac: 0.1
@@ -40,7 +50,7 @@ model_params:
   verbose: -1
 
 hyperparameter_tuning:
-  n_trials: 10
+  n_trials: 20
   parameters:
     n_estimators:
       type: int
@@ -58,13 +68,9 @@ hyperparameter_tuning:
     boosting_type:
       type: categorical
       choices: ["gbdt", "dart", "goss"]
+    max_depth:
+      type: int
+      low: 2
+      high: 100
 
-experiment:
-  submit_to_kaggle: false
-  tuning: true
 
-kaggle:
-  data_dir: ${project_root}/data/kaggle
-  competition: nlp-getting-started
-  train_file: ${project_root}/data/kaggle/train.csv
-  test: new_test_value
