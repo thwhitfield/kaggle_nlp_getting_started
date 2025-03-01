@@ -12,6 +12,7 @@ submit_to_kaggle: false
 
 mlflow:
   experiment_name: kaggle_nlp_getting_started
+  run_id: null
   tags:
     features: count_vectorizer
     model: lgbm

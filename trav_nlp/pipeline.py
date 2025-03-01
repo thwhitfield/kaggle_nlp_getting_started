@@ -287,7 +287,15 @@ def tune_hyperparameters(
 def run_pipeline(cfg: DictConfig):
     ctx = get_run_context()
     run_name = getattr(ctx.flow_run, "name", "default_run")  # Retrieve Prefect run name
-    with mlflow.start_run(run_name=run_name):  # Use run_name in mlflow run
+    with mlflow.start_run(run_name=run_name) as run:
+        # Capture MLflow run id and store in config
+        cfg.mlflow.run_id = run.info.run_id
+        # Save the used config under a filename based on the run_id.
+        config_save_dir = "/Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started/config_history"
+        os.makedirs(config_save_dir, exist_ok=True)
+        config_save_path = os.path.join(config_save_dir, f"{run_name}.yaml")
+        OmegaConf.save(cfg, config_save_path, resolve=True)
+
         mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))
         mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
@@ -321,23 +329,41 @@ def run_pipeline(cfg: DictConfig):
             for key, value in best_params.items():
                 mlflow.log_param(f"best_model_params.{key}", value)
             mlflow.log_metric("best_val_roc_auc", best_metric)
+            # Update the config with the best parameters and re-save
+            cfg.model_params.update(best_params)
+            OmegaConf.save(cfg, config_save_path, resolve=True)
             model = best_model
         else:
             model = train(df_train, df_val, model_params=cfg.model_params)
 
         eval_df_test(model, df_test)
 
-        if cfg.submit_to_kaggle:
-            df_full_train = pl.concat([df_train, df_test])
-            full_pipeline = train(
-                df_full_train, model_params=cfg.model_params, full_train=True
-            )
-            generate_and_submit_to_kaggle(
-                full_pipeline,
-                cfg.data.raw_test_path,
-                cfg.data.raw_sample_submission_path,
-                submissions_dir=cfg.data.submissions_dir,
-            )
+        # Removed automatic Kaggle submission.
+        logging.info(
+            "Pipeline run complete. Review test set performance before manual submission using submit_pipeline_run()."
+        )
+
+
+# Updated submission flow: remove internal mlflow.run so that external CLI can resume the run.
+@flow(name="submit_pipeline_run")
+def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
+    # No mlflow.start_run wrapper here because the CLI wraps this flow.
+    df_train, df_val, df_test = train_val_test_split(
+        data_file=cfg.data.raw_train_path,
+        train_frac=cfg.split_params.train_frac,
+        val_frac=cfg.split_params.val_frac,
+        test_frac=cfg.split_params.test_frac,
+        random_seed=cfg.split_params.train_val_test_seed,
+    )
+    df_full_train = pl.concat([df_train, df_test])
+    full_pipeline = train(df_full_train, model_params=cfg.model_params, full_train=True)
+    generate_and_submit_to_kaggle(
+        full_pipeline,
+        cfg.data.raw_test_path,
+        cfg.data.raw_sample_submission_path,
+        submissions_dir=cfg.data.submissions_dir,
+    )
+    logging.info(f"Submission for run '{run_identifier}' completed.")
 
 
 if __name__ == "__main__":
