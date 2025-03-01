@@ -36,6 +36,7 @@ model_params:
   max_depth: -1
   random_state: 42
   boosting_type: 'gbdt'
+  verbose: -1
 
 hyperparameter_tuning:
   n_trials: 10
@@ -65,3 +66,4 @@ kaggle:
   data_dir: ${project_root}/data/kaggle
   competition: nlp-getting-started
   train_file: ${project_root}/data/kaggle/train.csv
+  test: new_test_value

@@ -1,7 +1,9 @@
 import logging
 import os
 import sys
+import warnings
 import zipfile
+from pathlib import Path
 
 import kaggle
 import lightgbm as lgb
@@ -17,7 +19,17 @@ from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
-from trav_nlp.misc import polars_train_test_split
+from trav_nlp.misc import polars_train_test_split, verify_git_commit
+
+# Get the directory containing the current file
+CURRENT_DIR = Path(__file__).parent
+
+# Filter all the LGBMClassifier not valid feature names warnings
+warnings.filterwarnings(
+    "ignore",
+    message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
+    category=UserWarning,
+)
 
 
 @task(cache_policy=INPUTS)
@@ -139,6 +151,10 @@ def submit_to_kaggle():
 
 @flow
 def run_pipeline(cfg: DictConfig):
+
+    # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
+    # commit_hash = verify_git_commit(CURRENT_DIR)
+
     # Call download_kaggle_data using config parameters
     download_kaggle_data(
         data_dir=cfg.kaggle.data_dir,
