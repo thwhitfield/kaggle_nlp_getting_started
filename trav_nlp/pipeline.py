@@ -368,7 +368,6 @@ def run_pipeline(cfg: DictConfig):
         mlflow.log_artifact(config_save_path)
 
         mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags, resolve=True))
-        mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
         if cfg.embeddings.name == "gensim":
             embeddings = downloader.load(cfg.embeddings.gensim_embedding_name)
@@ -400,9 +399,9 @@ def run_pipeline(cfg: DictConfig):
                 n_trials=cfg.hyperparameter_tuning.n_trials,
                 embeddings=embeddings,
             )
-            for key, value in best_params.items():
-                mlflow.log_param(f"best_model_params.{key}", value)
-            mlflow.log_metric("best_val_roc_auc", best_metric)
+            # for key, value in best_params.items():
+            #     mlflow.log_param(f"best_model_params.{key}", value)
+            # mlflow.log_metric("best_val_roc_auc", best_metric)
             # Update the config with the best parameters and re-save
             cfg.model_params.update(best_params)
             OmegaConf.save(cfg, config_save_path, resolve=True)
@@ -419,6 +418,9 @@ def run_pipeline(cfg: DictConfig):
         logging.info(
             "Pipeline run complete. Review test set performance before manual submission using submit_pipeline_run()."
         )
+
+        # Log the parameters at the end so that the cfg can be updated first (if needed)
+        mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
 
 
 # Updated submission flow: remove internal mlflow.run so that external CLI can resume the run.
