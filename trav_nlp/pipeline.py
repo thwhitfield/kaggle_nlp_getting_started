@@ -342,6 +342,12 @@ def run_pipeline(cfg: DictConfig):
     ctx = get_run_context()
     run_name = getattr(ctx.flow_run, "name", "default_run")  # Retrieve Prefect run name
     with mlflow.start_run(run_name=run_name) as run:
+
+        if not cfg.test_run:
+            # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
+            git_commit_hash = verify_git_commit(CURRENT_DIR)
+            cfg.git_commit_hash = git_commit_hash
+
         # Capture MLflow run id and store in config
         cfg.mlflow.run_id = run.info.run_id
         # Save the used config under a filename based on the run_id.
@@ -351,11 +357,8 @@ def run_pipeline(cfg: DictConfig):
         OmegaConf.save(cfg, config_save_path, resolve=True)
         mlflow.log_artifact(config_save_path)
 
-        mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags))
+        mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags, resolve=True))
         mlflow.log_params(flatten_dict(OmegaConf.to_container(cfg, resolve=True)))
-
-        # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
-        # commit_hash = verify_git_commit(CURRENT_DIR)
 
         if cfg.embeddings.name == "gensim":
             embeddings = downloader.load(cfg.embeddings.gensim_embedding_name)

@@ -10,13 +10,18 @@ hydra:
 
 run_hyperparameter_tuning: false
 submit_to_kaggle: false
+test_run: false
+
+git_commit_hash: null
 
 mlflow:
   experiment_name: kaggle_nlp_getting_started
   run_id: null
   tags:
-    features: count_vectorizer
+    features: ${embeddings.name}
     model: lgbm
+    test_run: ${test_run}
+
 
 kaggle_competition: nlp-getting-started
 
