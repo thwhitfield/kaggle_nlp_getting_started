@@ -3,6 +3,8 @@ data
 outputs/
 mlruns/
 .DS_Store
+logs/
+config_history/
 
 # Byte-compiled / optimized / DLL files
 __pycache__/
