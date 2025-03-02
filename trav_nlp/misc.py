@@ -193,10 +193,6 @@ def flatten_dict(d, parent_key="", sep="."):
     return dict(items)
 
 
-import os
-import subprocess
-
-
 def verify_git_commit(*target_folders):
     """
     Verifies that each specified folder within a git repository has no uncommitted changes or untracked files.
@@ -273,6 +269,15 @@ def verify_git_commit(*target_folders):
     # If all checks pass, return the current commit hash.
     commit_hash = subprocess.check_output(
         ["git", "rev-parse", "HEAD"], cwd=repo_root, text=True
+    ).strip()
+
+    return commit_hash
+
+
+def get_git_commit_hash():
+    # If all checks pass, return the current commit hash.
+    commit_hash = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], text=True
     ).strip()
 
     return commit_hash

@@ -25,6 +25,7 @@ from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import (
     flatten_dict,
+    get_git_commit_hash,
     polars_train_test_split,
     polars_train_val_test_split,
     submit_to_kaggle,
@@ -343,6 +344,16 @@ def run_pipeline(cfg: DictConfig):
     run_name = getattr(ctx.flow_run, "name", "default_run")  # Retrieve Prefect run name
     with mlflow.start_run(run_name=run_name) as run:
 
+        # If the cfg.git_commit_hash is populated, that should mean that we're re-running a previous
+        # pipeline run. In that case we check to make sure that we're on the same git commit,
+        # otherwise we'll raise a RuntimeError
+        if cfg.git_commit_hash is not None:
+            curr_commit_hash = get_git_commit_hash()
+            if cfg.git_commit_hash != curr_commit_hash:
+                raise RuntimeError(
+                    f"Commit hash in cfg file, {cfg.git_commit_hash}, not equal to current cfg hash, {curr_commit_hash}"
+                )
+
         if not cfg.test_run:
             # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
             git_commit_hash = verify_git_commit(CURRENT_DIR)
@@ -422,7 +433,7 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
         test_frac=cfg.split_params.test_frac,
         random_seed=cfg.split_params.train_val_test_seed,
     )
-    df_full_train = pl.concat([df_train, df_test])
+    df_full_train = pl.concat([df_train, df_val, df_test])
     full_pipeline = train(df_full_train, model_params=cfg.model_params, full_train=True)
     generate_and_submit_to_kaggle(
         full_pipeline,
