@@ -9,13 +9,16 @@ from pathlib import Path
 import kaggle
 import lightgbm as lgb
 import mlflow
+import numpy as np
 import optuna
 import polars as pl
+from gensim import downloader
 from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
 from prefect import flow, task
 from prefect.cache_policies import DEFAULT, INPUTS
 from prefect.context import get_run_context  # New import
+from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
 from sklearn.pipeline import make_pipeline
@@ -97,8 +100,48 @@ def train_val_test_split(
     return df_train, df_val, df_test
 
 
+class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
+    """
+    Custom transformer that converts a collection of texts to their embedding representations.
+    The embeddings for each text are computed by averaging the word embeddings.
+    """
+
+    def __init__(self, embeddings, aggregation="mean"):
+        self.embeddings = embeddings
+        self.aggregation = aggregation
+
+    def fit(self, X, y=None):
+        return self
+
+    def transform(self, X):
+        transformed_X = []
+        for text in X:
+            words = (
+                text.split()
+            )  # simple whitespace tokenizer; replace with a better tokenizer if needed
+            # Collect embeddings for words that exist in our vocabulary
+            word_embs = [
+                self.embeddings[word] for word in words if word in self.embeddings
+            ]
+            if word_embs:
+                if self.aggregation == "mean":
+                    emb = np.mean(word_embs, axis=0)
+                elif self.aggregation == "sum":
+                    emb = np.sum(word_embs, axis=0)
+                else:
+                    raise ValueError(
+                        "Unsupported aggregation method: choose 'mean' or 'sum'"
+                    )
+            else:
+                # If none of the words are in our embeddings, return a zero vector
+                # emb = np.zeros(len(next(iter(self.embeddings.values()))))
+                emb = np.zeros(len(next(iter(self.embeddings))))
+            transformed_X.append(emb)
+        return np.array(transformed_X)
+
+
 @task
-def train(df_train, df_val=None, full_train=False, model_params={}):
+def train(df_train, df_val=None, full_train=False, model_params={}, embeddings=None):
     """
     Train and optimize the model.
 
@@ -124,13 +167,20 @@ def train(df_train, df_val=None, full_train=False, model_params={}):
 
     convert_to_numpy_transform = FunctionTransformer(convert_to_numpy)
 
-    # Create the pipeline with the text selector, vectorizer, and classifier
-    pipeline = make_pipeline(
-        extract_text_transform,
-        CountVectorizer(),
-        convert_to_numpy_transform,
-        lgb.LGBMClassifier(**model_params),
-    )
+    if embeddings is None:
+        # Create the pipeline with the text selector, vectorizer, and classifier
+        pipeline = make_pipeline(
+            extract_text_transform,
+            CountVectorizer(),
+            convert_to_numpy_transform,
+            lgb.LGBMClassifier(**model_params),
+        )
+    else:
+        pipeline = make_pipeline(
+            extract_text_transform,
+            EmbeddingVectorizer(embeddings),
+            lgb.LGBMClassifier(**model_params),
+        )
 
     pipeline.fit(df_train, df_train["target"])
 
@@ -233,7 +283,7 @@ def suggest_parameters(trial, param_ranges):
 
 @task
 def tune_hyperparameters(
-    df_train, df_val, model_params_base, param_ranges, n_trials=10
+    df_train, df_val, model_params_base, param_ranges, n_trials=10, embeddings=None
 ):
     """
     Tune hyperparameters using Optuna.
@@ -268,7 +318,11 @@ def tune_hyperparameters(
             mlflow.log_params(mlflow_params)
 
             model = train(
-                df_train, df_val, full_train=False, model_params=tuning_params
+                df_train,
+                df_val,
+                full_train=False,
+                model_params=tuning_params,
+                embeddings=None,
             )
             val_preds = model.predict_proba(df_val)[:, 1]
         return roc_auc_score(df_val["target"], val_preds)
@@ -303,6 +357,11 @@ def run_pipeline(cfg: DictConfig):
         # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
         # commit_hash = verify_git_commit(CURRENT_DIR)
 
+        if cfg.embeddings.name == "gensim":
+            embeddings = downloader.load(cfg.embeddings.gensim_embedding_name)
+        elif cfg.embeddings.name == "count_vectorizer":
+            embeddings = None
+
         # Call download_kaggle_data using config parameters
         download_kaggle_data(
             data_dir=cfg.data.raw_dir,
@@ -326,6 +385,7 @@ def run_pipeline(cfg: DictConfig):
                 cfg.model_params,
                 OmegaConf.to_container(cfg.hyperparameter_tuning.parameters),
                 n_trials=cfg.hyperparameter_tuning.n_trials,
+                embeddings=embeddings,
             )
             for key, value in best_params.items():
                 mlflow.log_param(f"best_model_params.{key}", value)
@@ -336,7 +396,9 @@ def run_pipeline(cfg: DictConfig):
             mlflow.log_artifact(config_save_path)
             model = best_model
         else:
-            model = train(df_train, df_val, model_params=cfg.model_params)
+            model = train(
+                df_train, df_val, model_params=cfg.model_params, embeddings=embeddings
+            )
 
         eval_df_test(model, df_test)
 

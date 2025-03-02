@@ -1,5 +1,6 @@
 defaults:
   - _self_
+  - embeddings: glove1
 
 
 # Disable Hydra's automatic chdir if you want your project_root to remain the same as when you launch the command.
