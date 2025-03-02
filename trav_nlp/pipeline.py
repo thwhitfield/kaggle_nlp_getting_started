@@ -348,13 +348,12 @@ def run_pipeline(cfg: DictConfig):
         # pipeline run. In that case we check to make sure that we're on the same git commit,
         # otherwise we'll raise a RuntimeError
         if cfg.git_commit_hash is not None:
-            curr_commit_hash = get_git_commit_hash()
+            curr_commit_hash = verify_git_commit(CURRENT_DIR)
             if cfg.git_commit_hash != curr_commit_hash:
                 raise RuntimeError(
                     f"Commit hash in cfg file, {cfg.git_commit_hash}, not equal to current cfg hash, {curr_commit_hash}"
                 )
-
-        if not cfg.test_run:
+        elif not cfg.test_run:
             # Verify that the trav_nlp folder doesn't have any uncommitted changes to it
             git_commit_hash = verify_git_commit(CURRENT_DIR)
             cfg.git_commit_hash = git_commit_hash
