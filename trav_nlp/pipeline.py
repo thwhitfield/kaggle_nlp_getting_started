@@ -347,7 +347,13 @@ def tune_hyperparameters(
     best_trial_params = study.best_trial.params
     best_params = model_params_base.copy()
     best_params.update(best_trial_params)
-    best_model = train(df_train, df_val, full_train=False, model_params=best_params)
+    best_model = train(
+        df_train,
+        df_val,
+        full_train=False,
+        model_params=best_params,
+        embeddings=embeddings,
+    )
     return best_model, best_params, study.best_value
 
 
