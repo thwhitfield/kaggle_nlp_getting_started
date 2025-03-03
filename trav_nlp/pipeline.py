@@ -143,7 +143,7 @@ class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
 
 
 @task
-def train(df_train, df_val=None, full_train=False, model_params={}, embeddings=None):
+def train(df_train, df_val=None, full_train=False, model_params=None, embeddings=None):
     """
     Train and optimize the model.
 
@@ -156,6 +156,9 @@ def train(df_train, df_val=None, full_train=False, model_params={}, embeddings=N
     Returns:
         Pipeline: Trained model pipeline.
     """
+
+    if model_params is None:
+        model_params = {}
 
     # Define a function to extract the 'text' column
     def extract_text(df):
@@ -373,6 +376,7 @@ def run_pipeline(cfg: DictConfig):
 
         # Download the embeddings if necessary
         if cfg.embeddings.type == "gensim":
+            logging.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
             embeddings = downloader.load(cfg.embeddings.name)
         elif cfg.embeddings.type == "count_vectorizer":
             embeddings = None
