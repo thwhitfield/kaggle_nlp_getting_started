@@ -15,9 +15,11 @@ import polars as pl
 from gensim import downloader
 from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
+from prefect import get_run_logger  # New import to use Prefect logging
 from prefect import flow, task
 from prefect.cache_policies import DEFAULT, INPUTS
 from prefect.context import get_run_context  # New import
+from prefect.settings import PREFECT_LOGGING_LEVEL
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import roc_auc_score
@@ -42,6 +44,10 @@ warnings.filterwarnings(
     message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
     category=UserWarning,
 )
+
+
+# Example usage
+print(f"Current Prefect logging level: {PREFECT_LOGGING_LEVEL.value()}")
 
 
 @task(cache_policy=INPUTS)
@@ -156,6 +162,7 @@ def train(df_train, df_val=None, full_train=False, model_params=None, embeddings
     Returns:
         Pipeline: Trained model pipeline.
     """
+    logger = get_run_logger()  # Use Prefect logger
 
     if model_params is None:
         model_params = {}
@@ -193,13 +200,13 @@ def train(df_train, df_val=None, full_train=False, model_params=None, embeddings
     train_roc_auc = roc_auc_score(df_train["target"], train_preds)
 
     if not full_train:
-        logging.info(f"Train ROC: {train_roc_auc}")
+        logger.info(f"Train ROC: {train_roc_auc}")
         mlflow.log_metric("train_roc_auc", train_roc_auc)
 
     if df_val is not None:
         val_preds = pipeline.predict_proba(df_val)[:, 1]
         val_roc_auc = roc_auc_score(df_val["target"], val_preds)
-        logging.info(f"Val ROC: {val_roc_auc}")
+        logger.info(f"Val ROC: {val_roc_auc}")
         mlflow.log_metric("val_roc_auc", val_roc_auc)
 
     return pipeline
@@ -217,9 +224,10 @@ def eval_df_test(pipeline, df_test):
     Returns:
         None
     """
+    logger = get_run_logger()  # Use Prefect logger
     test_preds = pipeline.predict_proba(df_test)[:, 1]
     test_roc_auc = roc_auc_score(df_test["target"], test_preds)
-    logging.info(f"Test ROC: {test_roc_auc}")
+    logger.info(f"Test ROC: {test_roc_auc}")
     mlflow.log_metric("test_roc_auc", test_roc_auc)
 
 
@@ -305,8 +313,8 @@ def tune_hyperparameters(
     """
 
     def objective(trial):
-
         with mlflow.start_run(nested=True):
+            logger = get_run_logger()  # Use Prefect logger
             tuning_params = model_params_base.copy()
             # Log parameters to MLflow with prefix
             mlflow_params = {}
@@ -322,17 +330,20 @@ def tune_hyperparameters(
             # Log the trial's parameters to MLflow
             mlflow.log_params(mlflow_params)
 
+            logger.info(tuning_params)
+
             model = train(
                 df_train,
                 df_val,
                 full_train=False,
                 model_params=tuning_params,
-                embeddings=None,
+                embeddings=embeddings,
             )
             val_preds = model.predict_proba(df_val)[:, 1]
         return roc_auc_score(df_val["target"], val_preds)
 
     study = optuna.create_study(direction="maximize")
+    study.enqueue_trial(OmegaConf.to_container(cfg.model_params, resolve=True))
     study.optimize(objective, n_trials=n_trials)
 
     best_trial_params = study.best_trial.params
@@ -344,6 +355,7 @@ def tune_hyperparameters(
 
 @flow
 def run_pipeline(cfg: DictConfig):
+    logger = get_run_logger()  # Use Prefect logger
     ctx = get_run_context()
     run_name = getattr(ctx.flow_run, "name", "default_run")  # Retrieve Prefect run name
     with mlflow.start_run(run_name=run_name) as run:
@@ -376,7 +388,7 @@ def run_pipeline(cfg: DictConfig):
 
         # Download the embeddings if necessary
         if cfg.embeddings.type == "gensim":
-            logging.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
+            logger.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
             embeddings = downloader.load(cfg.embeddings.name)
         elif cfg.embeddings.type == "count_vectorizer":
             embeddings = None
@@ -399,10 +411,12 @@ def run_pipeline(cfg: DictConfig):
             # Hyperparameter tuning is enabled.
             # Pass the new hyperparameter parameters structure from config to the tuner.
             best_model, best_params, best_metric = tune_hyperparameters(
-                df_train,
-                df_val,
-                cfg.model_params,
-                OmegaConf.to_container(cfg.hyperparameter_tuning.parameters),
+                df_train=df_train,
+                df_val=df_val,
+                model_params_base=cfg.model_params,
+                param_ranges=OmegaConf.to_container(
+                    cfg.hyperparameter_tuning.parameters
+                ),
                 n_trials=cfg.hyperparameter_tuning.n_trials,
                 embeddings=embeddings,
             )
@@ -420,7 +434,7 @@ def run_pipeline(cfg: DictConfig):
         eval_df_test(model, df_test)
 
         # Removed automatic Kaggle submission.
-        logging.info(
+        logger.info(
             "Pipeline run complete. Review test set performance before manual submission using submit_pipeline_run()."
         )
 
@@ -431,6 +445,7 @@ def run_pipeline(cfg: DictConfig):
 # Updated submission flow: remove internal mlflow.run so that external CLI can resume the run.
 @flow(name="submit_pipeline_run")
 def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
+    logger = get_run_logger()  # Use Prefect logger
     # No mlflow.start_run wrapper here because the CLI wraps this flow.
     df_train, df_val, df_test = train_val_test_split(
         data_file=cfg.data.raw_train_path,
@@ -447,7 +462,7 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
         cfg.data.raw_sample_submission_path,
         submissions_dir=cfg.data.submissions_dir,
     )
-    logging.info(f"Submission for run '{run_identifier}' completed.")
+    logger.info(f"Submission for run '{run_identifier}' completed.")
 
 
 if __name__ == "__main__":
