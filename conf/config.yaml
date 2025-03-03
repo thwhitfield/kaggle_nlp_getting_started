@@ -1,7 +1,7 @@
 defaults:
   - _self_
   - embeddings: glove1
-  - model_params: v1
+  - model_params: v2
   - hyperparameter_tuning: v1
 
 

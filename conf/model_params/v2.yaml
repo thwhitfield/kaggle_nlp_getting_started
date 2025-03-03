@@ -1,0 +1,8 @@
+
+num_leaves: 43
+n_estimators: 148
+learning_rate: 0.11744624347090063
+max_depth: 26
+random_state: 42
+boosting_type: dart
+verbose: -1
