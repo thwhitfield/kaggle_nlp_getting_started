@@ -1,3 +1,4 @@
 
+type: count_vectorizer
 name: count_vectorizer
 

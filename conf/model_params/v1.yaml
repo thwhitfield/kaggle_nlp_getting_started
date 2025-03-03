@@ -1,0 +1,8 @@
+
+num_leaves: 25
+n_estimators: 217
+learning_rate: 0.10960968621328598
+max_depth: 24
+random_state: 42
+boosting_type: gbdt
+verbose: -1

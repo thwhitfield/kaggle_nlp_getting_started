@@ -34,6 +34,7 @@ from trav_nlp.misc import (
 
 # Get the directory containing the current file
 CURRENT_DIR = Path(__file__).parent
+ROOT_DIR = CURRENT_DIR.parent
 
 # Filter all the LGBMClassifier not valid feature names warnings
 warnings.filterwarnings(
@@ -360,8 +361,9 @@ def run_pipeline(cfg: DictConfig):
 
         # Capture MLflow run id and store in config
         cfg.mlflow.run_id = run.info.run_id
+
         # Save the used config under a filename based on the run_id.
-        config_save_dir = "/Users/traviswhitfield/Documents/github/kaggle_nlp_getting_started/config_history"
+        config_save_dir = ROOT_DIR / "config_history"
         os.makedirs(config_save_dir, exist_ok=True)
         config_save_path = os.path.join(config_save_dir, f"{run_name}.yaml")
         OmegaConf.save(cfg, config_save_path, resolve=True)
@@ -369,9 +371,10 @@ def run_pipeline(cfg: DictConfig):
 
         mlflow.set_tags(OmegaConf.to_container(cfg.mlflow.tags, resolve=True))
 
-        if cfg.embeddings.name == "gensim":
-            embeddings = downloader.load(cfg.embeddings.gensim_embedding_name)
-        elif cfg.embeddings.name == "count_vectorizer":
+        # Download the embeddings if necessary
+        if cfg.embeddings.type == "gensim":
+            embeddings = downloader.load(cfg.embeddings.name)
+        elif cfg.embeddings.type == "count_vectorizer":
             embeddings = None
 
         # Call download_kaggle_data using config parameters
@@ -399,9 +402,7 @@ def run_pipeline(cfg: DictConfig):
                 n_trials=cfg.hyperparameter_tuning.n_trials,
                 embeddings=embeddings,
             )
-            # for key, value in best_params.items():
-            #     mlflow.log_param(f"best_model_params.{key}", value)
-            # mlflow.log_metric("best_val_roc_auc", best_metric)
+
             # Update the config with the best parameters and re-save
             cfg.model_params.update(best_params)
             OmegaConf.save(cfg, config_save_path, resolve=True)

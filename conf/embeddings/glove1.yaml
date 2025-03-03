@@ -1,3 +1,3 @@
 
-name: gensim
-gensim_embedding_name: glove-twitter-25
+type: gensim
+name: glove-twitter-25
