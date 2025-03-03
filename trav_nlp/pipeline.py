@@ -330,8 +330,6 @@ def tune_hyperparameters(
             # Log the trial's parameters to MLflow
             mlflow.log_params(mlflow_params)
 
-            logger.info(tuning_params)
-
             model = train(
                 df_train,
                 df_val,
