@@ -1,8 +1,8 @@
 
-num_leaves: 43
-n_estimators: 148
-learning_rate: 0.11744624347090063
-max_depth: 26
+num_leaves: 13
+n_estimators: 289
+learning_rate: 0.05902173187510596
+max_depth: 96
 random_state: 42
-boosting_type: dart
+boosting_type: gbdt
 verbose: -1

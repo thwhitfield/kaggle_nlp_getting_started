@@ -1,5 +1,5 @@
 
-n_trials: 20
+n_trials: 50
 parameters:
   n_estimators:
     type: int
