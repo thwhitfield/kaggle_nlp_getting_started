@@ -458,8 +458,21 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
         test_frac=cfg.split_params.test_frac,
         random_seed=cfg.split_params.train_val_test_seed,
     )
+
+    # Download the embeddings if necessary
+    if cfg.embeddings.type == "gensim":
+        logger.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
+        embeddings = downloader.load(cfg.embeddings.name)
+    elif cfg.embeddings.type == "count_vectorizer":
+        embeddings = None
+
     df_full_train = pl.concat([df_train, df_val, df_test])
-    full_pipeline = train(df_full_train, model_params=cfg.model_params, full_train=True)
+    full_pipeline = train(
+        df_full_train,
+        model_params=cfg.model_params,
+        full_train=True,
+        embeddings=embeddings,
+    )
     generate_and_submit_to_kaggle(
         full_pipeline,
         cfg.data.raw_test_path,
