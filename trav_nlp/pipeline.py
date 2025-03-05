@@ -1,3 +1,4 @@
+import argparse  # NEW import
 import datetime
 import logging
 import os
@@ -483,6 +484,26 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
 
 
 if __name__ == "__main__":
-    with initialize(config_path="../conf", job_name="run_pipeline", version_base=None):
-        cfg = compose(config_name="config", overrides=sys.argv[1:])
-        run_pipeline(cfg)
+    # NEW: Parse command-line arguments
+    parser = argparse.ArgumentParser()
+    parser.add_argument(
+        "--load_config",
+        type=str,
+        help="Name of a previous run config in config_history (without path)",
+    )
+    # Parse known args to allow Hydra/compose to receive remaining args.
+    args, remaining_args = parser.parse_known_args()
+
+    if args.load_config:
+        # Load a previous config from config_history folder
+        config_path = os.path.join(ROOT_DIR, "config_history", args.load_config)
+        if not config_path.endswith(".yaml"):
+            config_path += ".yaml"
+        print(f"Loading config from: {config_path}")
+        cfg = OmegaConf.load(config_path)
+    else:
+        with initialize(
+            config_path="../conf", job_name="run_pipeline", version_base=None
+        ):
+            cfg = compose(config_name="config", overrides=remaining_args)
+    run_pipeline(cfg)
