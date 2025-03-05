@@ -23,7 +23,6 @@ from prefect.settings import PREFECT_LOGGING_LEVEL
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
 from sklearn.metrics import f1_score, precision_recall_curve, roc_auc_score
-from sklearn.model_selection import KFold, StratifiedKFold
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import (
@@ -114,75 +113,6 @@ def train_val_test_split(
     )
 
     return df_train, df_val, df_test
-
-
-def cross_validate_model(
-    X, y, pipeline_constructor, cv=5, stratified=True, random_seed=42
-):
-    """
-    Perform cross-validation on a model.
-
-    Args:
-        X: Features data
-        y: Target labels
-        pipeline_constructor: Function to create a new pipeline
-        cv (int): Number of folds for cross-validation
-        stratified (bool): Whether to use stratified folds
-        random_seed (int): Random seed for reproducibility
-
-    Returns:
-        tuple: Mean scores and list of trained models
-    """
-    logger = get_run_logger()
-
-    if stratified:
-        kf = StratifiedKFold(n_splits=cv, shuffle=True, random_state=random_seed)
-    else:
-        kf = KFold(n_splits=cv, shuffle=True, random_state=random_seed)
-
-    scores = {"f1": [], "roc_auc": []}
-    models = []
-
-    for i, (train_idx, val_idx) in enumerate(kf.split(X, y)):
-        X_train, X_val = X.iloc[train_idx], X.iloc[val_idx]
-        y_train, y_val = y.iloc[train_idx], y.iloc[val_idx]
-
-        # Create fresh pipeline for each fold
-        pipeline = pipeline_constructor()
-        pipeline.fit(X_train, y_train)
-
-        # Evaluate on validation fold
-        val_preds_proba = pipeline.predict_proba(X_val)[:, 1]
-        val_preds = pipeline.predict(X_val)
-        fold_roc_auc = roc_auc_score(y_val, val_preds_proba)
-        fold_f1 = f1_score(y_val, val_preds)
-
-        logger.info(f"Fold {i+1}/{cv} - ROC AUC: {fold_roc_auc:.4f}, F1: {fold_f1:.4f}")
-
-        scores["f1"].append(fold_f1)
-        scores["roc_auc"].append(fold_roc_auc)
-        models.append(pipeline)
-
-    mean_f1 = np.mean(scores["f1"])
-    mean_roc_auc = np.mean(scores["roc_auc"])
-    std_f1 = np.std(scores["f1"])
-    std_roc_auc = np.std(scores["roc_auc"])
-
-    logger.info(f"CV Mean ROC AUC: {mean_roc_auc:.4f} (±{std_roc_auc:.4f})")
-    logger.info(f"CV Mean F1: {mean_f1:.4f} (±{std_f1:.4f})")
-
-    # Log metrics to MLflow
-    mlflow.log_metric("cv_roc_auc_mean", mean_roc_auc)
-    mlflow.log_metric("cv_roc_auc_std", std_roc_auc)
-    mlflow.log_metric("cv_f1_mean", mean_f1)
-    mlflow.log_metric("cv_f1_std", std_f1)
-
-    return {
-        "mean_roc_auc": mean_roc_auc,
-        "mean_f1": mean_f1,
-        "std_roc_auc": std_roc_auc,
-        "std_f1": std_f1,
-    }, models
 
 
 class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
@@ -305,10 +235,6 @@ def train(
     model_params=None,
     embeddings=None,
     embedding_aggregations=None,
-    use_cross_validation=False,
-    cv_folds=5,
-    stratified_cv=True,
-    cv_random_seed=42,
 ):
     """
     Train and optimize the model.
@@ -318,12 +244,6 @@ def train(
         df_val (DataFrame, optional): Validation dataset. Defaults to None.
         full_train (bool, optional): Whether to train on the full dataset. Defaults to False.
         model_params (dict, optional): Parameters for the model. Defaults to {}.
-        embeddings (dict, optional): Word embeddings dictionary. Defaults to None.
-        embedding_aggregations (list, optional): Aggregation methods for embeddings. Defaults to None.
-        use_cross_validation (bool, optional): Whether to use cross-validation. Defaults to False.
-        cv_folds (int, optional): Number of folds for cross-validation. Defaults to 5.
-        stratified_cv (bool, optional): Whether to use stratified folds. Defaults to True.
-        cv_random_seed (int, optional): Random seed for cross-validation. Defaults to 42.
 
     Returns:
         Pipeline: Trained model pipeline.
@@ -333,69 +253,34 @@ def train(
     if model_params is None:
         model_params = {}
 
-    # If cross-validation is enabled and we have df_val, combine with df_train
-    if use_cross_validation and df_val is not None and not full_train:
-        logger.info("Using cross-validation - combining train and validation sets")
-        df_train = pl.concat([df_train, df_val])
+    # Define a function to extract the 'text' column
+    def extract_text(df):
+        return df["text"]
 
-    # Define a function to create a fresh pipeline
-    def create_pipeline():
-        # Define a function to extract the 'text' column
-        def extract_text(df):
-            return df["text"]
+    def convert_to_numpy(scipy_csr_matrix):
+        return scipy_csr_matrix.toarray()
 
-        def convert_to_numpy(scipy_csr_matrix):
-            return scipy_csr_matrix.toarray()
+    # Create a FunctionTransformer to apply that function
+    extract_text_transform = FunctionTransformer(extract_text)
 
-        # Create a FunctionTransformer to apply that function
-        extract_text_transform = FunctionTransformer(extract_text)
+    convert_to_numpy_transform = FunctionTransformer(convert_to_numpy)
 
-        convert_to_numpy_transform = FunctionTransformer(convert_to_numpy)
-
-        if embeddings is None:
-            # Create the pipeline with the text selector, vectorizer, and classifier
-            # Use the OptimizedThresholdClassifier to wrap LGBMClassifier
-            return make_pipeline(
-                extract_text_transform,
-                CountVectorizer(),
-                convert_to_numpy_transform,
-                OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
-            )
-        else:
-            return make_pipeline(
-                extract_text_transform,
-                EmbeddingVectorizer(embeddings, embedding_aggregations),
-                OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
-            )
-
-    # If using cross-validation and not doing full training
-    if use_cross_validation and not full_train:
-        # Preparing data for cross-validation
-        X = df_train.to_pandas()  # Convert to pandas for sklearn compatibility
-        y = X["target"]
-
-        cv_results, cv_models = cross_validate_model(
-            X,
-            y,
-            create_pipeline,
-            cv=cv_folds,
-            stratified=stratified_cv,
-            random_seed=cv_random_seed,
+    if embeddings is None:
+        # Create the pipeline with the text selector, vectorizer, and classifier
+        # Use the OptimizedThresholdClassifier to wrap LGBMClassifier
+        pipeline = make_pipeline(
+            extract_text_transform,
+            CountVectorizer(),
+            convert_to_numpy_transform,
+            OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
+        )
+    else:
+        pipeline = make_pipeline(
+            extract_text_transform,
+            EmbeddingVectorizer(embeddings, embedding_aggregations),
+            OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
         )
 
-        # Fit final model on full training data
-        pipeline = create_pipeline()
-        pipeline = pipeline.fit(df_train, df_train["target"])
-
-        # Log the optimized threshold
-        optimized_threshold = pipeline.steps[-1][1].threshold
-        logger.info(f"Final model optimized threshold: {optimized_threshold}")
-        mlflow.log_param("optimized_threshold", optimized_threshold)
-
-        return pipeline
-
-    # Original training process without cross-validation
-    pipeline = create_pipeline()
     pipeline = pipeline.fit(df_train, df_train["target"])
 
     # Log the optimized threshold
@@ -414,7 +299,7 @@ def train(
         mlflow.log_metric("train_roc_auc", train_roc_auc)
         mlflow.log_metric("train_f1", train_f1)
 
-    if df_val is not None and not use_cross_validation:
+    if df_val is not None:
         val_preds_proba = pipeline.predict_proba(df_val)[:, 1]
         val_preds = pipeline.predict(df_val)
         val_roc_auc = roc_auc_score(df_val["target"], val_preds_proba)
@@ -520,10 +405,6 @@ def tune_hyperparameters(
     n_trials=10,
     embeddings=None,
     embedding_aggregations=None,
-    use_cross_validation=False,
-    cv_folds=5,
-    stratified_cv=True,
-    cv_random_seed=42,
 ):
     """
     Tune hyperparameters using Optuna.
@@ -534,26 +415,10 @@ def tune_hyperparameters(
         model_params_base (dict): Base model parameters.
         param_ranges (dict): Parameter ranges for tuning.
         n_trials (int, optional): Number of tuning trials. Defaults to 10.
-        embeddings (dict, optional): Word embeddings dictionary. Defaults to None.
-        embedding_aggregations (list, optional): Aggregation methods for embeddings. Defaults to None.
-        use_cross_validation (bool, optional): Whether to use cross-validation. Defaults to False.
-        cv_folds (int, optional): Number of folds for cross-validation. Defaults to 5.
-        stratified_cv (bool, optional): Whether to use stratified folds. Defaults to True.
-        cv_random_seed (int, optional): Random seed for cross-validation. Defaults to 42.
 
     Returns:
         tuple: Best model, best parameters, and best metric value.
     """
-
-    # If cross-validation is enabled, combine train and validation sets
-    if use_cross_validation:
-        logger = get_run_logger()  # Use Prefect logger
-        logger.info(
-            "Using cross-validation for hyperparameter tuning - combining train and validation sets"
-        )
-        df_combined = pl.concat([df_train, df_val])
-    else:
-        df_combined = df_train
 
     def objective(trial):
         with mlflow.start_run(nested=True):
@@ -573,37 +438,20 @@ def tune_hyperparameters(
             # Log the trial's parameters to MLflow
             mlflow.log_params(mlflow_params)
 
-            if use_cross_validation:
-                model = train(
-                    df_combined,
-                    full_train=False,
-                    model_params=tuning_params,
-                    embeddings=embeddings,
-                    embedding_aggregations=embedding_aggregations,
-                    use_cross_validation=True,
-                    cv_folds=cv_folds,
-                    stratified_cv=stratified_cv,
-                    cv_random_seed=cv_random_seed,
-                )
-                # Get the CV metric from the MLflow run
-                return mlflow.get_run(
-                    run_id=mlflow.active_run().info.run_id
-                ).data.metrics["cv_roc_auc_mean"]
-            else:
-                model = train(
-                    df_train,
-                    df_val,
-                    full_train=False,
-                    model_params=tuning_params,
-                    embeddings=embeddings,
-                    embedding_aggregations=embedding_aggregations,
-                )
-                val_preds_proba = model.predict_proba(df_val)[:, 1]
-                val_preds = model.predict(df_val)
-                val_roc_auc = roc_auc_score(df_val["target"], val_preds_proba)
-                val_f1 = f1_score(df_val["target"], val_preds)
+            model = train(
+                df_train,
+                df_val,
+                full_train=False,
+                model_params=tuning_params,
+                embeddings=embeddings,
+                embedding_aggregations=embedding_aggregations,
+            )
+            val_preds_proba = model.predict_proba(df_val)[:, 1]
+            val_preds = model.predict(df_val)
+            val_roc_auc = roc_auc_score(df_val["target"], val_preds_proba)
+            val_f1 = f1_score(df_val["target"], val_preds)
 
-                return val_roc_auc
+            return val_roc_auc
 
     study = optuna.create_study(direction="maximize")
     study.enqueue_trial(OmegaConf.to_container(cfg.model_params, resolve=True))
@@ -612,29 +460,14 @@ def tune_hyperparameters(
     best_trial_params = study.best_trial.params
     best_params = model_params_base.copy()
     best_params.update(best_trial_params)
-
-    if use_cross_validation:
-        best_model = train(
-            df_combined,
-            full_train=False,
-            model_params=best_params,
-            embeddings=embeddings,
-            embedding_aggregations=embedding_aggregations,
-            use_cross_validation=True,
-            cv_folds=cv_folds,
-            stratified_cv=stratified_cv,
-            cv_random_seed=cv_random_seed,
-        )
-    else:
-        best_model = train(
-            df_train,
-            df_val,
-            full_train=False,
-            model_params=best_params,
-            embeddings=embeddings,
-            embedding_aggregations=embedding_aggregations,
-        )
-
+    best_model = train(
+        df_train,
+        df_val,
+        full_train=False,
+        model_params=best_params,
+        embeddings=embeddings,
+        embedding_aggregations=embedding_aggregations,
+    )
     return best_model, best_params, study.best_value
 
 
@@ -707,10 +540,6 @@ def run_pipeline(cfg: DictConfig):
                 n_trials=cfg.hyperparameter_tuning.n_trials,
                 embeddings=embeddings,
                 embedding_aggregations=embedding_aggregations,
-                use_cross_validation=cfg.get("use_cross_validation", False),
-                cv_folds=cfg.get("cv_folds", 5),
-                stratified_cv=cfg.get("stratified_cv", True),
-                cv_random_seed=cfg.get("cv_random_seed", 42),
             )
 
             # Update the config with the best parameters and re-save
@@ -725,10 +554,6 @@ def run_pipeline(cfg: DictConfig):
                 model_params=cfg.model_params,
                 embeddings=embeddings,
                 embedding_aggregations=embedding_aggregations,
-                use_cross_validation=cfg.get("use_cross_validation", False),
-                cv_folds=cfg.get("cv_folds", 5),
-                stratified_cv=cfg.get("stratified_cv", True),
-                cv_random_seed=cfg.get("cv_random_seed", 42),
             )
 
         eval_df_test(model, df_test)
