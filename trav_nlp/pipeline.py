@@ -483,24 +483,61 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
     logger.info(f"Submission for run '{run_identifier}' completed.")
 
 
+def load_config_from_path_or_name(config_arg):
+    """
+    Load configuration from either a direct path to a YAML file
+    or a name of a run in the config_history folder.
+
+    Args:
+        config_arg (str): Path to a YAML file or name of a run config
+
+    Returns:
+        OmegaConf: Loaded configuration
+
+    Raises:
+        ValueError: If the config_arg does not correspond to a valid file
+    """
+    # Check if the provided argument is a direct path to a YAML file
+    if os.path.isfile(config_arg) and (
+        config_arg.endswith(".yaml") or config_arg.endswith(".yml")
+    ):
+        print(f"Loading config from path: {config_arg}")
+        return OmegaConf.load(config_arg)
+
+    # Check if it's a name in the config_history folder
+    config_path = os.path.join(ROOT_DIR, "config_history", config_arg)
+    if not config_path.endswith(".yaml"):
+        config_path += ".yaml"
+
+    if os.path.isfile(config_path):
+        print(f"Loading config from run history: {config_path}")
+        return OmegaConf.load(config_path)
+
+    # If we got here, no valid config was found
+    raise ValueError(
+        f"Could not find configuration '{config_arg}'. "
+        f"Please provide either a valid path to a YAML file or "
+        f"the name of a run in the config_history folder."
+    )
+
+
 if __name__ == "__main__":
-    # NEW: Parse command-line arguments
+    # Parse command-line arguments
     parser = argparse.ArgumentParser()
     parser.add_argument(
         "--load_config",
         type=str,
-        help="Name of a previous run config in config_history (without path)",
+        help="Path to a YAML file or name of a previous run config in config_history folder",
     )
     # Parse known args to allow Hydra/compose to receive remaining args.
     args, remaining_args = parser.parse_known_args()
 
     if args.load_config:
-        # Load a previous config from config_history folder
-        config_path = os.path.join(ROOT_DIR, "config_history", args.load_config)
-        if not config_path.endswith(".yaml"):
-            config_path += ".yaml"
-        print(f"Loading config from: {config_path}")
-        cfg = OmegaConf.load(config_path)
+        try:
+            cfg = load_config_from_path_or_name(args.load_config)
+        except ValueError as e:
+            print(f"Error: {e}")
+            sys.exit(1)
     else:
         with initialize(
             config_path="../conf", job_name="run_pipeline", version_base=None

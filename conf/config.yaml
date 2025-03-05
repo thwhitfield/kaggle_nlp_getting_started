@@ -17,7 +17,6 @@ test_run: false
 git_commit_hash: null
 
 mlflow:
-  experiment_name: kaggle_nlp_getting_started
   run_id: null
   tags:
     features: ${embeddings.name}
