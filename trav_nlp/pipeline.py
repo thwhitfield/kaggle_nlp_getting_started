@@ -1,4 +1,4 @@
-import argparse  # NEW import
+import argparse
 import datetime
 import logging
 import os
@@ -16,14 +16,13 @@ import polars as pl
 from gensim import downloader
 from hydra import compose, initialize
 from omegaconf import DictConfig, OmegaConf
-from prefect import get_run_logger  # New import to use Prefect logging
-from prefect import flow, task
+from prefect import flow, get_run_logger, task
 from prefect.cache_policies import DEFAULT, INPUTS
-from prefect.context import get_run_context  # New import
+from prefect.context import get_run_context
 from prefect.settings import PREFECT_LOGGING_LEVEL
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics import roc_auc_score
+from sklearn.metrics import f1_score, precision_recall_curve, roc_auc_score
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import (
@@ -44,6 +43,13 @@ warnings.filterwarnings(
     "ignore",
     message="X does not have valid feature names, but LGBMClassifier was fitted with feature names",
     category=UserWarning,
+)
+
+# Filter Pipeline not fitted yet warnings
+warnings.filterwarnings(
+    "ignore",
+    message="This Pipeline instance is not fitted yet",
+    category=FutureWarning,
 )
 
 
@@ -175,6 +181,52 @@ class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
         return np.array(transformed_X)
 
 
+class OptimizedThresholdClassifier:
+    """
+    A wrapper for classifiers that optimizes the decision threshold to maximize F1 score.
+    """
+
+    def __init__(self, classifier):
+        self.classifier = classifier
+        self.threshold = 0.5  # Default threshold
+
+    def fit(self, X, y):
+        """
+        Fits the underlying classifier and optimizes the decision threshold
+        using the precision-recall curve to maximize F1 score.
+        """
+        self.classifier = self.classifier.fit(X, y)
+        y_scores = self.classifier.predict_proba(X)[:, 1]
+
+        # Calculate precision and recall values for different thresholds
+        precision, recall, thresholds = precision_recall_curve(y, y_scores)
+
+        # Calculate F1 score for each threshold
+        # Note: precision_recall_curve returns one more precision/recall value than thresholds
+        f1_scores = [2 * (p * r) / (p + r + 1e-10) for p, r in zip(precision, recall)]
+
+        # Find the threshold that gives the best F1 score
+        # -1 because precision_recall_curve returns one more precision/recall value
+        if len(thresholds) > 0:
+            best_idx = np.argmax(f1_scores[:-1])
+            self.threshold = thresholds[best_idx]
+
+        return self
+
+    def predict(self, X):
+        """
+        Predicts classes using the optimized threshold.
+        """
+        y_scores = self.classifier.predict_proba(X)[:, 1]
+        return (y_scores >= self.threshold).astype(int)
+
+    def predict_proba(self, X):
+        """
+        Returns probability estimates.
+        """
+        return self.classifier.predict_proba(X)
+
+
 @task
 def train(
     df_train,
@@ -215,33 +267,46 @@ def train(
 
     if embeddings is None:
         # Create the pipeline with the text selector, vectorizer, and classifier
+        # Use the OptimizedThresholdClassifier to wrap LGBMClassifier
         pipeline = make_pipeline(
             extract_text_transform,
             CountVectorizer(),
             convert_to_numpy_transform,
-            lgb.LGBMClassifier(**model_params),
+            OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
         )
     else:
         pipeline = make_pipeline(
             extract_text_transform,
             EmbeddingVectorizer(embeddings, embedding_aggregations),
-            lgb.LGBMClassifier(**model_params),
+            OptimizedThresholdClassifier(lgb.LGBMClassifier(**model_params)),
         )
 
-    pipeline.fit(df_train, df_train["target"])
+    pipeline = pipeline.fit(df_train, df_train["target"])
 
-    train_preds = pipeline.predict_proba(df_train)[:, 1]
-    train_roc_auc = roc_auc_score(df_train["target"], train_preds)
+    # Log the optimized threshold
+    optimized_threshold = pipeline.steps[-1][1].threshold
+    logger.info(f"Optimized threshold: {optimized_threshold}")
+    mlflow.log_param("optimized_threshold", optimized_threshold)
+
+    # Calculate ROC AUC and F1 scores for training data
+    train_preds_proba = pipeline.predict_proba(df_train)[:, 1]
+    train_preds = pipeline.predict(df_train)
+    train_roc_auc = roc_auc_score(df_train["target"], train_preds_proba)
+    train_f1 = f1_score(df_train["target"], train_preds)
 
     if not full_train:
-        logger.info(f"Train ROC: {train_roc_auc}")
+        logger.info(f"Train ROC: {train_roc_auc}, Train F1: {train_f1}")
         mlflow.log_metric("train_roc_auc", train_roc_auc)
+        mlflow.log_metric("train_f1", train_f1)
 
     if df_val is not None:
-        val_preds = pipeline.predict_proba(df_val)[:, 1]
-        val_roc_auc = roc_auc_score(df_val["target"], val_preds)
-        logger.info(f"Val ROC: {val_roc_auc}")
+        val_preds_proba = pipeline.predict_proba(df_val)[:, 1]
+        val_preds = pipeline.predict(df_val)
+        val_roc_auc = roc_auc_score(df_val["target"], val_preds_proba)
+        val_f1 = f1_score(df_val["target"], val_preds)
+        logger.info(f"Val ROC: {val_roc_auc}, Val F1: {val_f1}")
         mlflow.log_metric("val_roc_auc", val_roc_auc)
+        mlflow.log_metric("val_f1", val_f1)
 
     return pipeline
 
@@ -259,10 +324,13 @@ def eval_df_test(pipeline, df_test):
         None
     """
     logger = get_run_logger()  # Use Prefect logger
-    test_preds = pipeline.predict_proba(df_test)[:, 1]
-    test_roc_auc = roc_auc_score(df_test["target"], test_preds)
-    logger.info(f"Test ROC: {test_roc_auc}")
+    test_preds_proba = pipeline.predict_proba(df_test)[:, 1]
+    test_preds = pipeline.predict(df_test)
+    test_roc_auc = roc_auc_score(df_test["target"], test_preds_proba)
+    test_f1 = f1_score(df_test["target"], test_preds)
+    logger.info(f"Test ROC: {test_roc_auc}, Test F1: {test_f1}")
     mlflow.log_metric("test_roc_auc", test_roc_auc)
+    mlflow.log_metric("test_f1", test_f1)
 
 
 @task
@@ -378,8 +446,12 @@ def tune_hyperparameters(
                 embeddings=embeddings,
                 embedding_aggregations=embedding_aggregations,
             )
-            val_preds = model.predict_proba(df_val)[:, 1]
-        return roc_auc_score(df_val["target"], val_preds)
+            val_preds_proba = model.predict_proba(df_val)[:, 1]
+            val_preds = model.predict(df_val)
+            val_roc_auc = roc_auc_score(df_val["target"], val_preds_proba)
+            val_f1 = f1_score(df_val["target"], val_preds)
+
+            return val_roc_auc
 
     study = optuna.create_study(direction="maximize")
     study.enqueue_trial(OmegaConf.to_container(cfg.model_params, resolve=True))
