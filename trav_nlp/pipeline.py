@@ -606,13 +606,14 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
     logger.info(f"Submission for run '{run_identifier}' completed.")
 
 
-def load_config_from_path_or_name(config_arg):
+def load_config_from_path_or_name(config_arg, overrides=None):
     """
     Load configuration from either a direct path to a YAML file
     or a name of a run in the config_history folder.
 
     Args:
         config_arg (str): Path to a YAML file or name of a run config
+        overrides (list, optional): List of override strings in the format "key=value"
 
     Returns:
         OmegaConf: Loaded configuration
@@ -625,23 +626,54 @@ def load_config_from_path_or_name(config_arg):
         config_arg.endswith(".yaml") or config_arg.endswith(".yml")
     ):
         print(f"Loading config from path: {config_arg}")
-        return OmegaConf.load(config_arg)
-
+        cfg = OmegaConf.load(config_arg)
     # Check if it's a name in the config_history folder
-    config_path = os.path.join(ROOT_DIR, "config_history", config_arg)
-    if not config_path.endswith(".yaml"):
-        config_path += ".yaml"
+    else:
+        config_path = os.path.join(ROOT_DIR, "config_history", config_arg)
+        if not config_path.endswith(".yaml"):
+            config_path += ".yaml"
 
-    if os.path.isfile(config_path):
-        print(f"Loading config from run history: {config_path}")
-        return OmegaConf.load(config_path)
+        if os.path.isfile(config_path):
+            print(f"Loading config from run history: {config_path}")
+            cfg = OmegaConf.load(config_path)
+        else:
+            # If we got here, no valid config was found
+            raise ValueError(
+                f"Could not find configuration '{config_arg}'. "
+                f"Please provide either a valid path to a YAML file or "
+                f"the name of a run in the config_history folder."
+            )
 
-    # If we got here, no valid config was found
-    raise ValueError(
-        f"Could not find configuration '{config_arg}'. "
-        f"Please provide either a valid path to a YAML file or "
-        f"the name of a run in the config_history folder."
-    )
+    # Apply overrides if provided
+    if overrides:
+        print(f"Applying overrides: {overrides}")
+        for override in overrides:
+            if "=" in override:
+                key, value = override.split("=", 1)
+                # Handle various value types
+                try:
+                    # Try to evaluate as Python literal (for numbers, booleans, etc.)
+                    import ast
+
+                    parsed_value = ast.literal_eval(value)
+                except (ValueError, SyntaxError):
+                    # If not a Python literal, keep as string
+                    parsed_value = value
+
+                # Update the config with the override
+                keys = key.split(".")
+                curr = cfg
+                for k in keys[:-1]:
+                    if k not in curr:
+                        curr[k] = {}
+                    curr = curr[k]
+                curr[keys[-1]] = parsed_value
+            else:
+                print(
+                    f"Warning: Invalid override format: {override}, expected key=value"
+                )
+
+    return cfg
 
 
 if __name__ == "__main__":
@@ -652,12 +684,21 @@ if __name__ == "__main__":
         type=str,
         help="Path to a YAML file or name of a previous run config in config_history folder",
     )
+    parser.add_argument(
+        "--config_override",
+        "-o",
+        action="append",
+        help="Override config values (can be used multiple times). Format: key=value",
+        default=[],
+    )
     # Parse known args to allow Hydra/compose to receive remaining args.
     args, remaining_args = parser.parse_known_args()
 
     if args.load_config:
         try:
-            cfg = load_config_from_path_or_name(args.load_config)
+            cfg = load_config_from_path_or_name(
+                args.load_config, overrides=args.config_override
+            )
         except ValueError as e:
             print(f"Error: {e}")
             sys.exit(1)
@@ -665,5 +706,8 @@ if __name__ == "__main__":
         with initialize(
             config_path="../conf", job_name="run_pipeline", version_base=None
         ):
+            # If there are config overrides, add them to the Hydra overrides
+            if args.config_override:
+                remaining_args.extend(args.config_override)
             cfg = compose(config_name="config", overrides=remaining_args)
     run_pipeline(cfg)
