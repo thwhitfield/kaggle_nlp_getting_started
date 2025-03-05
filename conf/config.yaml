@@ -48,3 +48,9 @@ split_params:
   test_frac: 0.1
   train_val_test_seed: 42
 
+# Cross-validation settings
+use_cross_validation: true
+cv_folds: 5
+stratified_cv: true
+cv_random_seed: 42
+
