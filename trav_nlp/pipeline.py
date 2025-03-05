@@ -112,12 +112,25 @@ def train_val_test_split(
 class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
     """
     Custom transformer that converts a collection of texts to their embedding representations.
-    The embeddings for each text are computed by averaging the word embeddings.
+    The embeddings for each text are computed by applying one or more aggregation methods
+    to the word embeddings (mean, sum, min, max).
+
+    Parameters:
+    -----------
+    embeddings : dict or similar
+        Word embeddings dictionary where keys are words and values are embeddings
+    aggregation : str or list, default=["mean"]
+        Aggregation method(s) to use. Can be a single string or a list of strings.
+        Supported methods: "mean", "sum", "min", "max"
     """
 
-    def __init__(self, embeddings, aggregation="mean"):
+    def __init__(self, embeddings, aggregation=["mean"]):
         self.embeddings = embeddings
-        self.aggregation = aggregation
+        # Convert string to list if a single aggregation method is provided
+        if isinstance(aggregation, str):
+            self.aggregation = [aggregation]
+        else:
+            self.aggregation = aggregation
 
     def fit(self, X, y=None):
         return self
@@ -132,25 +145,45 @@ class EmbeddingVectorizer(BaseEstimator, TransformerMixin):
             word_embs = [
                 self.embeddings[word] for word in words if word in self.embeddings
             ]
-            if word_embs:
-                if self.aggregation == "mean":
-                    emb = np.mean(word_embs, axis=0)
-                elif self.aggregation == "sum":
-                    emb = np.sum(word_embs, axis=0)
-                else:
-                    raise ValueError(
-                        "Unsupported aggregation method: choose 'mean' or 'sum'"
-                    )
+
+            if not word_embs:
+                # If none of the words are in our embeddings, return a zero vector for each aggregation method
+                emb_dim = len(next(iter(self.embeddings)))
+                emb = np.zeros(emb_dim * len(self.aggregation))
             else:
-                # If none of the words are in our embeddings, return a zero vector
-                # emb = np.zeros(len(next(iter(self.embeddings.values()))))
-                emb = np.zeros(len(next(iter(self.embeddings))))
+                # Apply each aggregation method and concatenate the results
+                aggregated_embs = []
+                for agg_method in self.aggregation:
+                    if agg_method == "mean":
+                        agg_emb = np.mean(word_embs, axis=0)
+                    elif agg_method == "sum":
+                        agg_emb = np.sum(word_embs, axis=0)
+                    elif agg_method == "min":
+                        agg_emb = np.min(word_embs, axis=0)
+                    elif agg_method == "max":
+                        agg_emb = np.max(word_embs, axis=0)
+                    else:
+                        raise ValueError(
+                            "Unsupported aggregation method: choose from 'mean', 'sum', 'min', or 'max'"
+                        )
+                    aggregated_embs.append(agg_emb)
+
+                # Concatenate all aggregation results
+                emb = np.concatenate(aggregated_embs)
+
             transformed_X.append(emb)
         return np.array(transformed_X)
 
 
 @task
-def train(df_train, df_val=None, full_train=False, model_params=None, embeddings=None):
+def train(
+    df_train,
+    df_val=None,
+    full_train=False,
+    model_params=None,
+    embeddings=None,
+    embedding_aggregations=None,
+):
     """
     Train and optimize the model.
 
@@ -191,7 +224,7 @@ def train(df_train, df_val=None, full_train=False, model_params=None, embeddings
     else:
         pipeline = make_pipeline(
             extract_text_transform,
-            EmbeddingVectorizer(embeddings),
+            EmbeddingVectorizer(embeddings, embedding_aggregations),
             lgb.LGBMClassifier(**model_params),
         )
 
@@ -297,7 +330,13 @@ def suggest_parameters(trial, param_ranges):
 
 @task
 def tune_hyperparameters(
-    df_train, df_val, model_params_base, param_ranges, n_trials=10, embeddings=None
+    df_train,
+    df_val,
+    model_params_base,
+    param_ranges,
+    n_trials=10,
+    embeddings=None,
+    embedding_aggregations=None,
 ):
     """
     Tune hyperparameters using Optuna.
@@ -337,6 +376,7 @@ def tune_hyperparameters(
                 full_train=False,
                 model_params=tuning_params,
                 embeddings=embeddings,
+                embedding_aggregations=embedding_aggregations,
             )
             val_preds = model.predict_proba(df_val)[:, 1]
         return roc_auc_score(df_val["target"], val_preds)
@@ -354,6 +394,7 @@ def tune_hyperparameters(
         full_train=False,
         model_params=best_params,
         embeddings=embeddings,
+        embedding_aggregations=embedding_aggregations,
     )
     return best_model, best_params, study.best_value
 
@@ -395,8 +436,10 @@ def run_pipeline(cfg: DictConfig):
         if cfg.embeddings.type == "gensim":
             logger.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
             embeddings = downloader.load(cfg.embeddings.name)
+            embedding_aggregations = cfg.embeddings.aggregations
         elif cfg.embeddings.type == "count_vectorizer":
             embeddings = None
+            embedding_aggregations = None
 
         # Call download_kaggle_data using config parameters
         download_kaggle_data(
@@ -433,7 +476,11 @@ def run_pipeline(cfg: DictConfig):
             model = best_model
         else:
             model = train(
-                df_train, df_val, model_params=cfg.model_params, embeddings=embeddings
+                df_train,
+                df_val,
+                model_params=cfg.model_params,
+                embeddings=embeddings,
+                embedding_aggregations=embedding_aggregations,
             )
 
         eval_df_test(model, df_test)
@@ -464,8 +511,10 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
     if cfg.embeddings.type == "gensim":
         logger.info(f"Downloading gensim embedding: {cfg.embeddings.name}")
         embeddings = downloader.load(cfg.embeddings.name)
+        embedding_aggregations = cfg.embeddings.aggregations
     elif cfg.embeddings.type == "count_vectorizer":
         embeddings = None
+        embedding_aggregations = None
 
     df_full_train = pl.concat([df_train, df_val, df_test])
     full_pipeline = train(
@@ -473,6 +522,7 @@ def submit_pipeline_run(run_identifier: str, cfg: DictConfig):
         model_params=cfg.model_params,
         full_train=True,
         embeddings=embeddings,
+        embedding_aggregations=embedding_aggregations,
     )
     generate_and_submit_to_kaggle(
         full_pipeline,
