@@ -467,6 +467,7 @@ def run_pipeline(cfg: DictConfig):
                 ),
                 n_trials=cfg.hyperparameter_tuning.n_trials,
                 embeddings=embeddings,
+                embedding_aggregations=embedding_aggregations,
             )
 
             # Update the config with the best parameters and re-save
