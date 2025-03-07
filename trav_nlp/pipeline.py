@@ -1,17 +1,21 @@
 import argparse
 import datetime
+import io
 import logging
 import os
 import sys
+import tempfile
 import warnings
 import zipfile
 from pathlib import Path
 
 import kaggle
 import lightgbm as lgb
+import matplotlib.pyplot as plt
 import mlflow
 import numpy as np
 import optuna
+import pandas as pd
 import polars as pl
 from gensim import downloader
 from hydra import compose, initialize
@@ -22,7 +26,18 @@ from prefect.context import get_run_context
 from prefect.settings import PREFECT_LOGGING_LEVEL
 from sklearn.base import BaseEstimator, TransformerMixin
 from sklearn.feature_extraction.text import CountVectorizer
-from sklearn.metrics import f1_score, precision_recall_curve, roc_auc_score
+from sklearn.metrics import (
+    accuracy_score,
+    average_precision_score,
+    classification_report,
+    confusion_matrix,
+    f1_score,
+    precision_recall_curve,
+    precision_score,
+    recall_score,
+    roc_auc_score,
+    roc_curve,
+)
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import FunctionTransformer
 from trav_nlp.misc import (
@@ -311,6 +326,200 @@ def train(
     return pipeline
 
 
+def generate_and_log_evaluation_plots(model, X_test, y_true, y_pred_proba, y_pred):
+    """
+    Generate evaluation plots (ROC, PR curve) and classification metrics for a model.
+
+    Args:
+        model: The trained model
+        X_test: Test features
+        y_true: Ground truth labels
+        y_pred_proba: Predicted probabilities
+        y_pred: Predicted labels
+
+    Returns:
+        dict: Dictionary with computed metrics
+    """
+    # Create temporary directory for plots
+    with tempfile.TemporaryDirectory() as tmp_dir:
+        # Calculate metrics
+        metrics = {
+            "accuracy": accuracy_score(y_true, y_pred),
+            "precision": precision_score(y_true, y_pred),
+            "recall": recall_score(y_true, y_pred),
+            "f1": f1_score(y_true, y_pred),
+            "roc_auc": roc_auc_score(y_true, y_pred_proba),
+            "avg_precision": average_precision_score(y_true, y_pred_proba),
+        }
+
+        # Get the current threshold from model
+        current_threshold = get_model_threshold(model)
+
+        # Generate ROC curve plot
+        roc_path = os.path.join(tmp_dir, "roc_curve.png")
+        plot_roc_curve(
+            y_true, y_pred_proba, current_threshold, metrics["roc_auc"], roc_path
+        )
+
+        # Generate Precision-Recall curve
+        pr_path = os.path.join(tmp_dir, "precision_recall_curve.png")
+        plot_precision_recall_curve(
+            y_true, y_pred_proba, current_threshold, metrics["avg_precision"], pr_path
+        )
+
+        # Generate confusion matrix
+        cm_path = os.path.join(tmp_dir, "confusion_matrix.png")
+        plot_confusion_matrix(y_true, y_pred, cm_path)
+
+        # Create classification report
+        report_path = os.path.join(tmp_dir, "classification_report.csv")
+        save_classification_report(y_true, y_pred, report_path)
+
+        # Log all artifacts to MLflow
+        mlflow.log_artifacts(tmp_dir, "df_test_metrics")
+
+        # Log individual metrics
+        for name, value in metrics.items():
+            if name not in [
+                "roc_auc",
+                "f1",
+            ]:  # These are already logged in eval_df_test
+                mlflow.log_metric(f"test_{name}", value)
+
+        return metrics
+
+
+def get_model_threshold(model, default=0.5):
+    """Extract the threshold from the model if available."""
+    if hasattr(model, "steps") and len(model.steps) > 0:
+        final_step = model.steps[-1][1]
+        if hasattr(final_step, "threshold"):
+            return final_step.threshold
+    return default
+
+
+def plot_roc_curve(y_true, y_pred_proba, threshold, auc_score, save_path):
+    """Plot and save ROC curve with threshold marker."""
+    plt.figure(figsize=(10, 6))
+    fpr, tpr, thresholds = roc_curve(y_true, y_pred_proba)
+    plt.plot(fpr, tpr, lw=2, label=f"ROC curve (AUC = {auc_score:.3f})")
+    plt.plot([0, 1], [0, 1], "k--", lw=2)
+
+    # Find point on ROC curve for current threshold
+    if len(thresholds) > 0:
+        idx = np.abs(thresholds - threshold).argmin()
+        roc_x, roc_y = fpr[idx], tpr[idx]
+
+        # Plot threshold point
+        plt.scatter(
+            [roc_x],
+            [roc_y],
+            c="red",
+            s=20,
+            zorder=10,
+            label=f"Threshold = {threshold:.3f}",
+        )
+
+        # Draw guidelines and add annotations
+        plt.plot([0, roc_x], [roc_y, roc_y], "k--", alpha=0.6)
+        plt.plot([roc_x, roc_x], [0, roc_y], "k--", alpha=0.6)
+        plt.text(
+            roc_x / 2, roc_y + 0.02, f"TPR = {roc_y:.3f}", ha="center", va="bottom"
+        )
+        plt.text(
+            roc_x, roc_y / 2, f"FPR = {roc_x:.3f}", ha="right", va="center", rotation=90
+        )
+
+    plt.xlim([0.0, 1.0])
+    plt.ylim([0.0, 1.05])
+    plt.xlabel("False Positive Rate")
+    plt.ylabel("True Positive Rate")
+    plt.title("Receiver Operating Characteristic (ROC) Curve")
+    plt.legend(loc="lower right")
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
+
+
+def plot_precision_recall_curve(
+    y_true, y_pred_proba, threshold, avg_precision, save_path
+):
+    """Plot and save Precision-Recall curve with threshold marker."""
+    plt.figure(figsize=(10, 6))
+    precision, recall, pr_thresholds = precision_recall_curve(y_true, y_pred_proba)
+    plt.plot(recall, precision, lw=2, label=f"PR curve (AP = {avg_precision:.3f})")
+
+    # Find point on PR curve for current threshold
+    if len(pr_thresholds) > 0:
+        # Find closest threshold (precision_recall_curve returns one more precision/recall than thresholds)
+        idx = np.abs(pr_thresholds - threshold).argmin()
+        pr_x, pr_y = recall[idx], precision[idx]
+
+        # Plot threshold point
+        plt.scatter(
+            [pr_x],
+            [pr_y],
+            c="red",
+            s=20,
+            zorder=10,
+            label=f"Threshold = {threshold:.3f}",
+        )
+
+        # Draw guidelines and add annotations
+        plt.plot([0, pr_x], [pr_y, pr_y], "k--", alpha=0.6)
+        plt.plot([pr_x, pr_x], [0, pr_y], "k--", alpha=0.6)
+        plt.text(
+            pr_x / 2, pr_y + 0.02, f"Precision = {pr_y:.3f}", ha="center", va="bottom"
+        )
+        plt.text(
+            pr_x, pr_y / 2, f"Recall = {pr_x:.3f}", ha="right", va="center", rotation=90
+        )
+
+    plt.xlabel("Recall")
+    plt.ylabel("Precision")
+    plt.title("Precision-Recall Curve")
+    plt.legend(loc="lower left")
+    plt.grid(True)
+    plt.savefig(save_path)
+    plt.close()
+
+
+def plot_confusion_matrix(y_true, y_pred, save_path):
+    """Plot and save confusion matrix."""
+    cm = confusion_matrix(y_true, y_pred)
+    plt.figure(figsize=(8, 6))
+    plt.imshow(cm, interpolation="nearest", cmap=plt.cm.Blues)
+    plt.title("Confusion Matrix")
+    plt.colorbar()
+    plt.xlabel("Predicted")
+    plt.ylabel("True")
+    plt.xticks([0, 1], ["Negative", "Positive"])
+    plt.yticks([0, 1], ["Negative", "Positive"])
+
+    # Add text annotations to confusion matrix
+    thresh = cm.max() / 2
+    for i in range(cm.shape[0]):
+        for j in range(cm.shape[1]):
+            plt.text(
+                j,
+                i,
+                format(cm[i, j], "d"),
+                ha="center",
+                va="center",
+                color="white" if cm[i, j] > thresh else "black",
+            )
+
+    plt.savefig(save_path)
+    plt.close()
+
+
+def save_classification_report(y_true, y_pred, save_path):
+    """Generate and save classification report as CSV."""
+    report = classification_report(y_true, y_pred, output_dict=True)
+    report_df = pd.DataFrame(report).transpose()
+    report_df.to_csv(save_path)
+
+
 @task
 def eval_df_test(pipeline, df_test):
     """
@@ -331,6 +540,13 @@ def eval_df_test(pipeline, df_test):
     logger.info(f"Test ROC: {test_roc_auc}, Test F1: {test_f1}")
     mlflow.log_metric("test_roc_auc", test_roc_auc)
     mlflow.log_metric("test_f1", test_f1)
+
+    # Generate and log evaluation plots and detailed metrics
+    metrics = generate_and_log_evaluation_plots(
+        pipeline, df_test, df_test["target"], test_preds_proba, test_preds
+    )
+
+    logger.info(f"Detailed evaluation metrics and plots saved to MLflow")
 
 
 @task
